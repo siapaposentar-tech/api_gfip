@@ -3,7 +3,6 @@ import os
 import hashlib
 import tempfile
 from datetime import datetime
-from decimal import Decimal
 
 import pdfplumber
 from fastapi import FastAPI, File, UploadFile, HTTPException
@@ -76,14 +75,14 @@ def get_or_create_segurado(cab: dict) -> str | None:
         if r.data:
             return r.data[0]["segurado_id"]
 
-    # 2) Criar novo segurado (SEM CPF!)
+    # 2) Criar novo segurado (SEM CPF E COM TRATAMENTO DE DATAS)
     resp = (
         supabase.table("segurados")
         .insert(
             {
                 "nome": nome,
-                "data_nascimento": cab.get("data_nascimento"),
-                "nome_mae": cab.get("nome_mae"),
+                "data_nascimento": cab.get("data_nascimento") or None,
+                "nome_mae": cab.get("nome_mae") or None,
                 "nit_principal": nit if nit else None,
             }
         )
@@ -214,7 +213,7 @@ async def processar_ci_gfip(
     if not conteudo:
         raise HTTPException(status_code=400, detail="Arquivo PDF vazio.")
 
-    # extrair texto
+    # extrair texto do PDF
     texto = ""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(conteudo)
@@ -255,5 +254,5 @@ async def processar_ci_gfip(
         "total_linhas": resultado.get("total_linhas", len(resultado.get("linhas", []))),
         "arquivo": arquivo.filename,
         "supabase": info_supabase,
-        "linhas": resultado.get("linhas", []),  # opcional
+        "linhas": resultado.get("linhas", []),
     }
