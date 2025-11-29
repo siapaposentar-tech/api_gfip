@@ -13,7 +13,7 @@ from supabase import create_client, Client
 from parsers.ci_gfip_universal import parse_ci_gfip, detectar_layout_ci_gfip
 
 # ============================================
-# CONFIGURAÇÃO DO FASTAPI
+# FASTAPI – Configuração
 # ============================================
 
 app = FastAPI()
@@ -27,7 +27,7 @@ app.add_middleware(
 )
 
 # ============================================
-# CONFIGURAÇÃO DO SUPABASE
+# SUPABASE – Conexão
 # ============================================
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -37,8 +37,9 @@ supabase: Client | None = None
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+
 # ============================================
-# FUNÇÕES DE APOIO
+# Funções Auxiliares
 # ============================================
 
 def so_numeros(valor: str | None) -> str:
@@ -53,10 +54,7 @@ def calcular_hash_arquivo(conteudo: bytes) -> str:
 
 def get_or_create_segurado(cab: dict) -> str | None:
     """
-    Localiza ou cria o segurado com base no NIT e no nome.
-    Usa tabelas:
-      - segurados
-      - segurado_nits
+    Localiza ou cria o segurado com base no NIT e nome.
     """
     if supabase is None:
         return None
@@ -67,7 +65,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
     if not nome:
         return None
 
-    # 1) Tenta localizar pelo NIT
+    # 1) Procurar segurado pelo NIT na tabela segurado_nits
     if nit:
         r = (
             supabase.table("segurado_nits")
@@ -78,7 +76,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
         if r.data:
             return r.data[0]["segurado_id"]
 
-    # 2) Cria um novo segurado
+    # 2) Criar novo segurado (SEM CPF!)
     resp = (
         supabase.table("segurados")
         .insert(
@@ -86,7 +84,6 @@ def get_or_create_segurado(cab: dict) -> str | None:
                 "nome": nome,
                 "data_nascimento": cab.get("data_nascimento"),
                 "nome_mae": cab.get("nome_mae"),
-                "cpf": cab.get("cpf"),
                 "nit_principal": nit if nit else None,
             }
         )
@@ -95,7 +92,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
 
     segurado_id = resp.data[0]["id"]
 
-    # 3) Registra o NIT principal
+    # 3) Registrar o NIT principal
     if nit:
         supabase.table("segurado_nits").insert(
             {
@@ -114,10 +111,12 @@ def salvar_ci_gfip_no_supabase(
     modelo_relatorio: str,
 ):
     """
-    Salva o resultado do parser nas tabelas:
+    Salva os dados da CI GFIP no Supabase.
+    Tabelas usadas:
       - ci_gfip_relatorios
       - ci_gfip_linhas
     """
+
     if supabase is None:
         return None
 
@@ -149,7 +148,7 @@ def salvar_ci_gfip_no_supabase(
 
     relatorio_id = resp_rel.data[0]["id"]
 
-    # prepara as linhas
+    # linhas
     linhas_insert = []
     for l in linhas:
         comp_date = l.get("competencia_date")
@@ -205,9 +204,9 @@ async def processar_ci_gfip(
 ):
     """
     Rota única para processar qualquer CI GFIP.
-    - Detecta automaticamente se é Modelo 1 (SEFIP) ou Modelo 2 (Condensado INSS/eSocial).
-    - Usa o parser universal.
-    - Salva no Supabase.
+    Detecta automaticamente se é:
+    - Modelo 1 (SEFIP)
+    - Modelo 2 (INSS/eSocial condensado)
     """
 
     conteudo = await arquivo.read()
@@ -215,7 +214,7 @@ async def processar_ci_gfip(
     if not conteudo:
         raise HTTPException(status_code=400, detail="Arquivo PDF vazio.")
 
-    # Extrai texto do PDF
+    # extrair texto
     texto = ""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(conteudo)
@@ -225,23 +224,22 @@ async def processar_ci_gfip(
         for pagina in pdf.pages:
             texto += (pagina.extract_text() or "") + "\n"
 
-    # Detecta layout e aplica o parser universal
+    # detectar layout
     layout = detectar_layout_ci_gfip(texto)
+
+    # aplicar parser universal
     resultado = parse_ci_gfip(texto)
 
     if resultado.get("erro") == "layout_nao_identificado":
-        raise HTTPException(
-            status_code=400,
-            detail="Não foi possível identificar o layout do CI GFIP.",
-        )
+        raise HTTPException(status_code=400, detail="Não foi possível identificar o layout do CI GFIP.")
 
-    # Acrescenta profissão e estado informados pelo usuário
+    # inserir profissao e estado manualmente
     cab = resultado.get("cabecalho", {}) or {}
     cab["profissao"] = profissao
     cab["estado"] = estado
     resultado["cabecalho"] = cab
 
-    # Salva no Supabase
+    # salvar no Supabase
     info_supabase = salvar_ci_gfip_no_supabase(
         parser=resultado,
         arquivo_nome=arquivo.filename,
@@ -257,6 +255,5 @@ async def processar_ci_gfip(
         "total_linhas": resultado.get("total_linhas", len(resultado.get("linhas", []))),
         "arquivo": arquivo.filename,
         "supabase": info_supabase,
-        # opcional: comentar a linha abaixo se quiser resposta mais leve
-        "linhas": resultado.get("linhas", []),
+        "linhas": resultado.get("linhas", []),  # opcional
     }
