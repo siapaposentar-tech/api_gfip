@@ -22,19 +22,19 @@ def detectar_layout_ci_gfip(texto: str) -> str:
 def parse_ci_gfip(texto: str) -> dict:
     """
     Parser Universal: escolhe automaticamente qual subparser usar.
-    (Os subparsers serão criados nos próximos passos)
     """
 
     layout = detectar_layout_ci_gfip(texto)
 
     if layout == "modelo_2":
-        from .ci_gfip_modelo_2 import parse_modelo_2
-        return parse_modelo_2(texto)
+        from .ci_gfip_modelo_2 import parse_ci_gfip_modelo_2
+        return parse_ci_gfip_modelo_2(texto)
 
     if layout == "modelo_1":
-        from .ci_gfip_modelo_1 import parse_modelo_1
-        return parse_modelo_1(texto)
+        from .ci_gfip_modelo_1 import parse_ci_gfip_modelo_1
+        return parse_ci_gfip_modelo_1(texto)
 
+    # Se não identificou layout
     return {
         "cabecalho": {},
         "linhas": [],
