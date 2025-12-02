@@ -145,4 +145,4 @@ def parse_ci_gfip(texto: str) -> Dict[str, Any]:
             "erro": f"erro_parser_universal: {type(e).__name__}: {e}",
         }
         return resultado
-eat: parser universal CI GFIP (modelo_1 + modelo_2)
+
