@@ -16,35 +16,43 @@ def normalizar_competencia(comp_str: str | None) -> tuple[str | None, str]:
     """
     Recebe um literal como '07/2023' e devolve:
     - data ISO (ex: "2023-07-01")
-    - literal original
+    - literal original (sempre devolvido)
     """
     if not comp_str:
         return None, ""
     try:
         dt = datetime.strptime(comp_str.strip(), "%m/%Y")
         return dt.strftime("%Y-%m-01"), comp_str
-    except:
+    except Exception:
         return None, comp_str
 
 
 def normalizar_data(ddmmaaaa: str | None) -> tuple[str | None, str]:
+    """
+    Recebe '31/12/2020' e devolve:
+    - data ISO (ex: "2020-12-31")
+    - literal original
+    """
     if not ddmmaaaa:
         return None, ""
     try:
         dt = datetime.strptime(ddmmaaaa.strip(), "%d/%m/%Y")
         return dt.strftime("%Y-%m-%d"), ddmmaaaa
-    except:
+    except Exception:
         return None, ddmmaaaa
 
 
 def normalizar_moeda(valor: str | None) -> tuple[float | None, str]:
+    """
+    Converte '1.234,56' → (1234.56, '1.234,56')
+    """
     if not valor:
         return None, ""
     bruto = valor.strip()
     txt = bruto.replace("R$", "").replace(".", "").replace(",", ".")
     try:
         return float(Decimal(txt)), bruto
-    except:
+    except Exception:
         return None, bruto
 
 
@@ -54,7 +62,8 @@ def normalizar_documento_tomador(valor: str | None) -> tuple[str, str]:
       - CNPJ_COMPLETO (14 dígitos)
       - CEI (12)
       - CPF (11)
-      - CNPJ_RAIZ (≤ 8 ou truncado)
+      - CNPJ_RAIZ (<= 8 ou truncado)
+      - DESCONHECIDO
     """
     if not valor:
         return "", "DESCONHECIDO"
@@ -71,24 +80,40 @@ def normalizar_documento_tomador(valor: str | None) -> tuple[str, str]:
         return numeros, "CPF"
 
     if len(numeros) <= 8:
+        # raiz de CNPJ (preenche à esquerda se for menor)
         return numeros.zfill(8), "CNPJ_RAIZ"
 
     if 9 <= len(numeros) <= 13:
+        # muito comum vir raiz + filial sem DV
         return numeros[:8].zfill(8), "CNPJ_RAIZ"
 
     return numeros, "DESCONHECIDO"
 
 
 # =====================================================================
-#  PARSER DO MODELO 2 – CONDENSADO / eSOCIAL / INSS
+#  PARSER DO MODELO 2 – TABELA HORIZONTAL CI GFIP/eSocial/INSS
 # =====================================================================
 
 def parse_ci_gfip_modelo_2(texto: str) -> dict:
-    # --------------------------------------------------------
-    # CABEÇALHO – super simples para este layout
-    # --------------------------------------------------------
+    """
+    Parser específico para os layouts:
+    'CONSULTA VALORES CI GFIP/eSocial/INSS'
 
-    cabecalho = {
+    Lê:
+      - Cabeçalho do filiado (Nit, Nome, Nome da Mãe, Data de Nascimento, CPF)
+      - Todas as linhas da tabela (GFIP + eSOCIAL) em múltiplas páginas
+
+    Retorna dict com:
+      - cabecalho
+      - linhas
+      - total_linhas
+      - layout = 'modelo_2'
+    """
+
+    # --------------------------------------------------------
+    # CABEÇALHO – extração robusta
+    # --------------------------------------------------------
+    cabecalho: dict[str, str | None] = {
         "nit": None,
         "nome": None,
         "nome_mae": None,
@@ -96,70 +121,146 @@ def parse_ci_gfip_modelo_2(texto: str) -> dict:
         "cpf": None,
     }
 
-    m_nome = re.search(r"Nome[: ]+(.+)", texto)
-    if m_nome:
-        cabecalho["nome"] = m_nome.group(1).strip()
-
-    m_cpf = re.search(r"CPF[: ]+([\d\.\-]+)", texto)
-    if m_cpf:
-        cabecalho["cpf"] = m_cpf.group(1).strip()
-
-    m_dn = re.search(r"Data de Nascimento[: ]+([0-9]{2}/[0-9]{2}/[0-9]{4})", texto)
-    if m_dn:
-        cabecalho["data_nascimento"] = normalizar_data(m_dn.group(1))[0]
-
-    m_nit = re.search(r"NIT[: ]+([\d\.]+)", texto)
+    # Nit: 1.688.946.939-0
+    m_nit = re.search(r"Nit[: ]+([\d\.\-]+)", texto, re.IGNORECASE)
     if m_nit:
         cabecalho["nit"] = so_numeros(m_nit.group(1))
 
-    # --------------------------------------------------------
-    # TABELA – linhas em formato condensado
-    # Cada PDF tem pequenas variações, então regex bem robusta
-    # --------------------------------------------------------
-
-    linhas = []
-
-    padrao = re.compile(
-        r"(?P<competencia>\d{2}/\d{4})\s+"
-        r"(?P<documento>[\d\.\-\/]+)\s+"
-        r"(?P<fpas>\d{3})\s+"
-        r"(?P<categoria>\d+)\s+"
-        r"(?P<codigo>\d+)\s+"
-        r"(?P<data_envio>\d{2}/\d{2}/\d{4})\s+"
-        r"(?P<remuneracao>[\d\.\,]+)\s+"
-        r"(?P<retido>[\d\.\,]+)\s+"
-        r"(?P<extemporaneo>Sim|Não)",
-        re.IGNORECASE
+    # Nome: TALITA ...  Data de Nascimento: 06/01/1990
+    m_nome = re.search(
+        r"Nome[: ]+(.+?)\s+Data de Nascimento[: ]+[0-9]{2}/[0-9]{2}/[0-9]{4}",
+        texto,
+        re.IGNORECASE | re.DOTALL,
     )
+    if m_nome:
+        cabecalho["nome"] = m_nome.group(1).strip()
 
-    for m in padrao.finditer(texto):
-        comp_date, comp_lit = normalizar_competencia(m.group("competencia"))
-        data_envio_date, data_envio_lit = normalizar_data(m.group("data_envio"))
-        remuneracao, remuneracao_lit = normalizar_moeda(m.group("remuneracao"))
-        retido, retido_lit = normalizar_moeda(m.group("retido"))
-        doc, doc_tipo = normalizar_documento_tomador(m.group("documento"))
+    # Data de Nascimento: 06/01/1990
+    m_dn = re.search(
+        r"Data de Nascimento[: ]+([0-9]{2}/[0-9]{2}/[0-9]{4})",
+        texto,
+        re.IGNORECASE,
+    )
+    if m_dn:
+        cabecalho["data_nascimento"] = normalizar_data(m_dn.group(1))[0]
 
-        linhas.append({
-            "fonte": "CONDENSADO",
-            "numero_documento": None,
-            "nit": cabecalho.get("nit"),
-            "competencia_literal": comp_lit,
-            "competencia_date": comp_date,
-            "documento_tomador": doc,
-            "documento_tomador_tipo": doc_tipo,
-            "fpas": m.group("fpas"),
-            "categoria_codigo": m.group("categoria"),
-            "codigo_gfip": m.group("codigo"),
-            "data_envio_literal": data_envio_lit,
-            "data_envio_date": data_envio_date,
-            "tipo_remuneracao": None,
-            "remuneracao_literal": remuneracao_lit,
-            "remuneracao": remuneracao,
-            "valor_retido_literal": retido_lit,
-            "valor_retido": retido,
-            "extemporaneo_literal": m.group("extemporaneo"),
-            "extemporaneo": 1 if m.group("extemporaneo").lower() == "sim" else 0,
-        })
+    # Nome da Mãe: ...
+    m_mae = re.search(
+        r"Nome da M[ãa]e[: ]+(.+?)(?:\s+CPF[: ]|Página\s+\d+ de \d+)",
+        texto,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m_mae:
+        cabecalho["nome_mae"] = m_mae.group(1).strip()
+
+    # CPF: 101.951.366-75
+    m_cpf = re.search(r"CPF[: ]+([\d\.\-]+)", texto, re.IGNORECASE)
+    if m_cpf:
+        cabecalho["cpf"] = m_cpf.group(1).strip()
+
+    # --------------------------------------------------------
+    # TABELA – uma linha por registro (GFIP ou eSOCIAL)
+    # --------------------------------------------------------
+    linhas: list[dict] = []
+
+    # Vamos trabalhar linha a linha do texto
+    for raw_line in texto.splitlines():
+        linha = raw_line.strip()
+
+        # Considera apenas linhas que começam com 'GFIP' ou 'eSOCIAL'
+        if not (linha.startswith("GFIP") or linha.upper().startswith("ESOCIAL")):
+            continue
+
+        # Quebra por espaços (colunas separadas por espaço)
+        partes = linha.split()
+        if len(partes) < 10:
+            # Linha estranha ou quebrada, ignora por segurança
+            continue
+
+        # Estrutura básica:
+        # 0  = Fonte (GFIP / eSOCIAL)
+        # 1  = Número do Documento
+        # 2  = NIT
+        # 3  = Competência (MM/AAAA)
+        # 4  = CNPJ/CPF/CEI (tomador)
+        # 5  = FPAS
+        # 6  = Categoria GFIP/eSocial
+        # 7  = Código GFIP
+        # 8  = Data de Envio
+        # 9..-4 = Tipo de Remuneração (pode ter 1 ou mais palavras)
+        # -3 = Remuneração
+        # -2 = Valor Retido
+        # -1 = Extemp. (Sim/Não)
+
+        fonte = partes[0]
+        numero_documento = partes[1]
+        nit_linha = partes[2]
+        competencia_lit = partes[3]
+        documento_tomador_raw = partes[4]
+        fpas = partes[5]
+        categoria = partes[6]
+        codigo_gfip = partes[7]
+        data_envio_lit = partes[8]
+
+        if len(partes) >= 12:
+            tipo_remuneracao_tokens = partes[9:-3]
+            remuneracao_txt = partes[-3]
+            valor_retido_txt = partes[-2]
+            extemporaneo_txt = partes[-1]
+        else:
+            # fallback: assume estrutura mínima
+            tipo_remuneracao_tokens = [partes[9]]
+            remuneracao_txt = partes[10] if len(partes) > 10 else ""
+            valor_retido_txt = partes[11] if len(partes) > 11 else ""
+            extemporaneo_txt = partes[12] if len(partes) > 12 else ""
+
+        tipo_remuneracao = " ".join(tipo_remuneracao_tokens).strip()
+
+        # Normalizações
+        comp_date, comp_literal = normalizar_competencia(competencia_lit)
+        data_envio_date, data_envio_literal = normalizar_data(data_envio_lit)
+        remuneracao, remuneracao_literal = normalizar_moeda(remuneracao_txt)
+        valor_retido, valor_retido_literal = normalizar_moeda(valor_retido_txt)
+        doc_tomador, doc_tomador_tipo = normalizar_documento_tomador(
+            documento_tomador_raw
+        )
+
+        extemp_literal = extemporaneo_txt.strip()
+        extemporaneo_bool = (
+            extemp_literal.lower().startswith("s")  # "Sim"
+            if extemp_literal
+            else False
+        )
+
+        linhas.append(
+            {
+                "fonte": fonte.upper(),  # GFIP ou ESOCIAL
+                "numero_documento": numero_documento,
+                "nit": so_numeros(nit_linha) or cabecalho.get("nit"),
+                "competencia_literal": comp_literal,
+                "competencia_date": comp_date,
+                "competencia_ano": int(comp_date.split("-")[0])
+                if comp_date
+                else None,
+                "competencia_mes": int(comp_date.split("-")[1])
+                if comp_date
+                else None,
+                "documento_tomador": doc_tomador,
+                "documento_tomador_tipo": doc_tomador_tipo,
+                "fpas": fpas,
+                "categoria_codigo": categoria,
+                "codigo_gfip": codigo_gfip,
+                "data_envio_literal": data_envio_literal,
+                "data_envio_date": data_envio_date,
+                "tipo_remuneracao": tipo_remuneracao or None,
+                "remuneracao_literal": remuneracao_literal,
+                "remuneracao": remuneracao,
+                "valor_retido_literal": valor_retido_literal,
+                "valor_retido": valor_retido,
+                "extemporaneo_literal": extemp_literal,
+                "extemporaneo": extemporaneo_bool,
+            }
+        )
 
     return {
         "cabecalho": cabecalho,
