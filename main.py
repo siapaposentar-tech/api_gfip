@@ -44,10 +44,8 @@ if SUPABASE_URL and SUPABASE_KEY:
 def so_numeros(valor: str | None) -> str:
     return re.sub(r"\D", "", valor or "")
 
-
 def calcular_hash_arquivo(conteudo: bytes) -> str:
     return hashlib.sha256(conteudo).hexdigest()
-
 
 def to_bool(value: str | None) -> bool | None:
     if not value:
@@ -59,19 +57,11 @@ def to_bool(value: str | None) -> bool | None:
         return False
     return None
 
-
 # ============================================
-# GET OR CREATE SEGURADO (TABELAS NOVAS)
+# SEGURADOS / NITS
 # ============================================
 
 def get_or_create_segurado(cab: dict) -> str | None:
-    """
-    Agora usa as tabelas corretas:
-
-    - ci_gfip_segurados
-    - ci_gfip_segurado_nits
-    """
-
     if supabase is None:
         return None
 
@@ -81,7 +71,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
     if not nome:
         return None
 
-    # 1 — BUSCA PELO NIT NA NOVA TABELA
+    # → BUSCA PELO NIT
     if nit:
         r = (
             supabase.table("ci_gfip_segurado_nits")
@@ -92,7 +82,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
         if r.data:
             return r.data[0]["segurado_id"]
 
-    # 2 — CRIA SEGURADO NOVO NA TABELA NOVA
+    # → CRIA SEGURADO
     resp = (
         supabase.table("ci_gfip_segurados")
         .insert(
@@ -108,7 +98,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
 
     segurado_id = resp.data[0]["id"]
 
-    # 3 — REGISTRA NIT PRINCIPAL NA TABELA NOVA
+    # → REGISTRA NIT
     if nit:
         supabase.table("ci_gfip_segurado_nits").insert(
             {"segurado_id": segurado_id, "nit": nit}
@@ -116,9 +106,8 @@ def get_or_create_segurado(cab: dict) -> str | None:
 
     return segurado_id
 
-
 # ============================================
-# SALVAR NO SUPABASE (TABELAS NOVAS)
+# SALVAR NO SUPABASE
 # ============================================
 
 def salvar_ci_gfip_no_supabase(parser: dict, arquivo_nome: str, arquivo_bytes: bytes, modelo_relatorio: str):
@@ -135,7 +124,7 @@ def salvar_ci_gfip_no_supabase(parser: dict, arquivo_nome: str, arquivo_bytes: b
 
     hash_doc = calcular_hash_arquivo(arquivo_bytes)
 
-    # SALVA RELATÓRIO (TABELA RENOMEADA)
+    # → SALVA RELATÓRIO
     resp_rel = (
         supabase.table("ci_gfip_relatorios")
         .insert(
@@ -154,7 +143,7 @@ def salvar_ci_gfip_no_supabase(parser: dict, arquivo_nome: str, arquivo_bytes: b
 
     relatorio_id = resp_rel.data[0]["id"]
 
-    # SALVA LINHAS (TABELA RENOMEADA)
+    # → LINHAS
     linhas_insert = []
 
     for l in linhas:
@@ -196,7 +185,6 @@ def salvar_ci_gfip_no_supabase(parser: dict, arquivo_nome: str, arquivo_bytes: b
         "linhas_salvas": len(linhas_insert),
     }
 
-
 # ============================================
 # ROTA PRINCIPAL
 # ============================================
@@ -213,30 +201,33 @@ async def processar_ci_gfip(
     if not conteudo:
         raise HTTPException(status_code=400, detail="Arquivo PDF vazio.")
 
-    # Extrai texto do PDF
-    texto = ""
+    # → SALVAR ARQUIVO TEMPORÁRIO
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(conteudo)
         caminho_pdf = tmp.name
 
+    # → EXTRAIR TEXTO
+    texto = ""
     with pdfplumber.open(caminho_pdf) as pdf:
         for pagina in pdf.pages:
             texto += (pagina.extract_text() or "") + "\n"
 
-    # Detectar layout e aplicar parser
+    # → DETECTAR LAYOUT / PARSE
     layout = detectar_layout_ci_gfip(texto)
     resultado = parse_ci_gfip(texto)
 
     if resultado.get("erro") == "layout_nao_identificado":
         raise HTTPException(400, "Layout do CI GFIP não identificado.")
 
-    # Adiciona profissão + estado
+    # ====================================
+    # ADICIONAR PROFISSÃO / ESTADO CORRETOS
+    # ====================================
     cab = resultado.get("cabecalho", {})
-    cab["profissao"] = profissao
-    cab["estado"] = estado
+    cab["profissao"] = profissao.strip()
+    cab["estado"] = estado.strip()
     resultado["cabecalho"] = cab
 
-    # Salva
+    # → SALVAR NO SUPABASE
     info_supabase = salvar_ci_gfip_no_supabase(
         parser=resultado,
         arquivo_nome=arquivo.filename,
@@ -252,5 +243,4 @@ async def processar_ci_gfip(
         "total_linhas": len(resultado.get("linhas", [])),
         "arquivo": arquivo.filename,
         "supabase": info_supabase,
-        "linhas": resultado.get("linhas", []),
     }
