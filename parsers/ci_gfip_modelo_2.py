@@ -3,13 +3,12 @@ from datetime import datetime
 from decimal import Decimal
 
 # =====================================================================
-#  NORMALIZAÇÕES
+#  FUNÇÕES DE NORMALIZAÇÃO
 # =====================================================================
 
 def so_numeros(valor: str | None) -> str:
-    if not valor:
-        return ""
-    return re.sub(r"\D", "", valor)
+    return re.sub(r"\D", "", valor or "")
+
 
 def normalizar_competencia(comp_str: str | None):
     if not comp_str:
@@ -20,6 +19,7 @@ def normalizar_competencia(comp_str: str | None):
     except:
         return None, comp_str
 
+
 def normalizar_data(ddmmaaaa: str | None):
     if not ddmmaaaa:
         return None, ""
@@ -29,46 +29,58 @@ def normalizar_data(ddmmaaaa: str | None):
     except:
         return None, ddmmaaaa
 
+
 def normalizar_moeda(valor: str | None):
     if not valor:
         return None, ""
     bruto = valor.strip()
-    txt = bruto.replace("R$", "").replace(".", "").replace(",", ".")
+    texto = bruto.replace("R$", "").replace(".", "").replace(",", ".")
     try:
-        return float(Decimal(txt)), bruto
+        return float(Decimal(texto)), bruto
     except:
         return None, bruto
+
 
 def normalizar_documento_tomador(valor: str | None):
     if not valor:
         return "", "DESCONHECIDO"
+
     numeros = so_numeros(valor)
 
+    # CNPJ COMPLETO
     if len(numeros) == 14:
         return numeros, "CNPJ_COMPLETO"
+
+    # CEI
     if len(numeros) == 12:
         return numeros, "CEI"
+
+    # CPF
     if len(numeros) == 11:
         return numeros, "CPF"
+
+    # CNPJ RAIZ (até 8 dígitos)
     if len(numeros) <= 8:
         return numeros.zfill(8), "CNPJ_RAIZ"
+
+    # CNPJ raiz + filial sem DV
     if 9 <= len(numeros) <= 13:
         return numeros[:8].zfill(8), "CNPJ_RAIZ"
 
     return numeros, "DESCONHECIDO"
 
+
 # =====================================================================
-#     PARSER UNIVERSAL HÍBRIDO – MODELO 2 (MÁXIMA ROBUSTEZ)
+#  PARSER UNIVERSAL HÍBRIDO – CI GFIP / eSocial / INSS
 # =====================================================================
 
 def parse_ci_gfip_modelo_2(texto: str) -> dict:
     """
-    PARSER HÍBRIDO – aceita qualquer tabela CI GFIP/eSocial/INSS.
-    Funciona mesmo quando pdfplumber separa ou cola colunas.
+    Parser definitivo, robusto e tolerante a qualquer PDF de CI GFIP/eSocial/INSS.
     """
 
     # --------------------------------------------------------
-    # EXTRAIR CABEÇALHO DO FILIADO
+    # CABEÇALHO – robusto, sem capturar a tabela
     # --------------------------------------------------------
 
     cabecalho = {
@@ -79,109 +91,133 @@ def parse_ci_gfip_modelo_2(texto: str) -> dict:
         "cpf": None,
     }
 
+    # Nit
     m_nit = re.search(r"Nit[: ]+([\d\.\-]+)", texto, re.IGNORECASE)
     if m_nit:
         cabecalho["nit"] = so_numeros(m_nit.group(1))
 
+    # Nome
     m_nome = re.search(
-        r"Nome[: ]+(.+?)\s+Data de Nascimento[: ]+[0-9]{2}/[0-9]{2}/[0-9]{4}",
+        r"Nome[: ]+([A-ZÇÃÂÉÊÍÓÔÚà-ú ]+?)\s+Data de Nascimento",
         texto,
-        re.IGNORECASE | re.DOTALL,
+        re.IGNORECASE,
     )
     if m_nome:
         cabecalho["nome"] = m_nome.group(1).strip()
 
-    m_dn = re.search(
-        r"Data de Nascimento[: ]+([0-9]{2}/[0-9]{2}/[0-9]{4})",
-        texto,
-        re.IGNORECASE,
-    )
+    # Data de nascimento
+    m_dn = re.search(r"Data de Nascimento[: ]+(\d{2}/\d{2}/\d{4})", texto)
     if m_dn:
         cabecalho["data_nascimento"] = normalizar_data(m_dn.group(1))[0]
 
+    # Nome da mãe – agora PARA antes de qualquer cabeçalho de tabela
     m_mae = re.search(
-        r"Nome da M[ãa]e[: ]+(.+?)(?:\s+CPF[: ]|Página\s+\d+ de \d+)",
+        r"Nome da M[ãa]e[: ]+(.+?)(?:\n\s*Fonte|\n\s*GFIP|\n\s*ESOCIAL|\nPágina)",
         texto,
         re.IGNORECASE | re.DOTALL,
     )
     if m_mae:
         cabecalho["nome_mae"] = m_mae.group(1).strip()
 
+    # CPF
     m_cpf = re.search(r"CPF[: ]+([\d\.\-]+)", texto, re.IGNORECASE)
     if m_cpf:
         cabecalho["cpf"] = m_cpf.group(1).strip()
 
     # --------------------------------------------------------
-    # ETAPA 1 – CAPTURAR TODAS AS LINHAS QUE CONTÊM GFIP/ESOCIAL
+    # CAPTURA DAS LINHAS DA TABELA
     # --------------------------------------------------------
 
     linhas_brutas = []
-    for line in texto.splitlines():
-        l = line.strip()
-        if l.startswith("GFIP") or l.upper().startswith("ESOCIAL"):
-            linhas_brutas.append(l)
+    for l in texto.splitlines():
+        s = l.strip()
+        if s.startswith("GFIP") or s.upper().startswith("ESOCIAL"):
+            linhas_brutas.append(s)
 
     # --------------------------------------------------------
-    # ETAPA 2 – RECONSTRUIR LINHAS QUE ESTÃO QUEBRADAS
+    # RECONSTRUÇÃO DE LINHAS QUEBRADAS
     # --------------------------------------------------------
 
     linhas_unificadas = []
     buffer = ""
 
     for l in linhas_brutas:
-        if buffer == "":
+        if not buffer:
             buffer = l
             continue
 
-        if re.match(r"^\S+$", l) and not re.search(r"\d{2}/\d{4}", l):
+        if not re.search(r"\d{2}/\d{4}", buffer):
             buffer += " " + l
-        elif re.match(r"^\d{2}/\d{4}$", l):
+            continue
+
+        if re.match(r"^[A-Z]{2,10}$", l):
             buffer += " " + l
-        else:
-            linhas_unificadas.append(buffer)
-            buffer = l
+            continue
+
+        linhas_unificadas.append(buffer)
+        buffer = l
 
     if buffer:
         linhas_unificadas.append(buffer)
 
     # --------------------------------------------------------
-    # ETAPA 3 – PROCESSAR CADA LINHA (AGORA UNIFICADA)
+    # PROCESSAMENTO DO REGISTRO
     # --------------------------------------------------------
 
     linhas = []
 
-    for raw in linhas_unificadas:
-        partes = raw.split()
+    for raw_line in linhas_unificadas:
+        partes = raw_line.split()
         if len(partes) < 10:
             continue
 
-        # Mapear campos
         fonte = partes[0]
-        numero_documento = partes[1]
-        nit_linha = partes[2]
-        competencia_lit = partes[3]
-        documento_raw = partes[4]
-        fpas = partes[5]
-        categoria = partes[6]
-        codigo_gfip = partes[7]
-        data_envio_lit = partes[8]
 
-        tipo_tokens = partes[9:-3]
-        remuneracao_txt = partes[-3]
-        valor_retido_txt = partes[-2]
-        extemporaneo_txt = partes[-1]
+        if fonte.upper() == "GFIP":
+            # GFIP segue o layout clássico
+            numero_documento = partes[1]
+            nit_linha = partes[2]
+            competencia_lit = partes[3]
+            doc_raw = partes[4]
+            fpas = partes[5]
+            categoria = partes[6]
+            codigo_gfip = partes[7]
+            data_envio_lit = partes[8]
 
-        tipo_remuneracao = " ".join(tipo_tokens).strip()
+            tipo_tokens = partes[9:-3]
+            remuneracao_txt = partes[-3]
+            valor_retido_txt = partes[-2]
+            extemp_txt = partes[-1]
 
-        # Normalização
+        else:
+            # ----------------------------------------
+            # ESOCIAL – layout diferente
+            # ----------------------------------------
+            numero_documento = partes[1]
+            nit_linha = partes[2]
+            competencia_lit = partes[3]
+            doc_raw = partes[4]
+            fpas = partes[5]
+            categoria = partes[6]
+            # No eSocial, o próximo campo é SIEMPRE a DATA DE ENVIO
+            data_envio_lit = partes[7]
+            # Depois o tipo de remuneração literal (NORMAL)
+            tipo_tokens = [partes[8]]
+            remuneracao_txt = partes[-3]
+            valor_retido_txt = partes[-2]
+            extemp_txt = partes[-1]
+            codigo_gfip = categoria  # eSocial não usa código GFIP clássico
+
+        # Normalizações
         comp_date, comp_literal = normalizar_competencia(competencia_lit)
         data_envio_date, data_envio_literal = normalizar_data(data_envio_lit)
         remuneracao, remuneracao_literal = normalizar_moeda(remuneracao_txt)
         valor_retido, valor_retido_literal = normalizar_moeda(valor_retido_txt)
 
-        doc_tomador, doc_tomador_tipo = normalizar_documento_tomador(documento_raw)
+        doc_tomador, doc_tomador_tipo = normalizar_documento_tomador(doc_raw)
 
-        extemp_literal = extemporaneo_txt.strip()
+        tipo_remuneracao = " ".join(tipo_tokens).strip()
+        extemp_literal = extemp_txt.strip()
         extemporaneo_bool = extemp_literal.lower().startswith("s")
 
         linhas.append(
