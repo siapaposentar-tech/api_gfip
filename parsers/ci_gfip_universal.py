@@ -1,148 +1,158 @@
 import re
-from typing import Dict, Any
+from datetime import datetime
+from decimal import Decimal
 
+# ============================================================
+# 1. DETECTAR LAYOUT
+# ============================================================
 
 def detectar_layout_ci_gfip(texto: str) -> str:
     """
-    Detecta automaticamente qual é o modelo de CI GFIP:
-
-    - modelo_1 → layouts antigos (relatórios SEFIP / GFIP tradicional)
-    - modelo_2 → CONSULTA VALORES CI GFIP / eSocial / INSS (layout novo misto)
-
-    Se não conseguir identificar com segurança, retorna "desconhecido".
+    Detecta automaticamente o layout do CI GFIP.
+    Retorna: "modelo_1", "modelo_2" ou "layout_nao_identificado".
     """
 
-    texto_upper = texto.upper()
-
-    # ---- Modelo 2 (o mais comum hoje) ----
-    # Palavras típicas que aparecem nos PDFs novos:
-    # "CONSULTA VALORES CI GFIP", "CI GFIP/ESOCIAL/INSS", "ESOCIAL"
-    if (
-        "CONSULTA VALORES CI GFIP" in texto_upper
-        or "CI GFIP/ESOCIAL/INSS" in texto_upper
-        or "CI GFIP / ESOCIAL / INSS" in texto_upper
-        or "ESOCIAL" in texto_upper
-    ):
-        return "modelo_2"
-
-    # ---- Modelo 1 (SEFIP antigo) ----
-    # Geralmente aparece "SEFIP" e alguma referência a "DATA DE ENVIO" ou
-    # colunas mais antigas de GFIP.
-    if "SEFIP" in texto_upper and "DATA DE ENVIO" in texto_upper:
+    if "COMPETÊNCIA" in texto and "FPAS" in texto:
         return "modelo_1"
 
-    # Se em algum momento você identificar novas frases-chave de um layout
-    # diferente, basta acrescentar aqui mais blocos if/elif.
+    if "tomador" in texto.lower() and "categoria" in texto.lower():
+        return "modelo_2"
 
-    return "desconhecido"
+    return "layout_nao_identificado"
 
+# ============================================================
+# 2. FUNÇÕES AUXILIARES
+# ============================================================
 
-def _normalizar_resultado_parser(resultado: Dict[str, Any]) -> Dict[str, Any]:
+def so_numeros(valor: str | None) -> str:
+    return re.sub(r"\D", "", valor or "")
+
+def parse_valor(valor: str | None):
     """
-    Garante que o dicionário de saída sempre tenha as mesmas chaves básicas.
+    Converte valores como '1.234,56' para Decimal.
     """
+    if not valor:
+        return None
+    v = valor.replace(".", "").replace(",", ".")
+    try:
+        return Decimal(v)
+    except:
+        return None
 
-    if resultado is None:
-        resultado = {}
+# ============================================================
+# 3. PARSE DO CABEÇALHO
+# ============================================================
 
-    cabecalho = resultado.get("cabecalho") or {}
-    linhas = resultado.get("linhas") or []
-
-    # Se o parser específico não calculou total_linhas, calculamos aqui.
-    total_linhas = resultado.get("total_linhas")
-    if total_linhas is None:
-        total_linhas = len(linhas)
-
-    resultado["cabecalho"] = cabecalho
-    resultado["linhas"] = linhas
-    resultado["total_linhas"] = total_linhas
-
-    return resultado
-
-
-def parse_ci_gfip(texto: str) -> Dict[str, Any]:
+def parse_cabecalho(texto: str) -> dict:
     """
-    PARSER UNIVERSAL
+    Extrai NIT, Nome, Nome da Mãe, Data de Nascimento e CPF.
+    Esses são os campos padrão DO RELATÓRIO.
+    🚨 Profissão e Estado NÃO são preenchidos aqui.
+       Eles vêm do Lovable e serão adicionados pelo main.py
+    """
+    cab = {}
 
-    - Detecta o layout automaticamente.
-    - Chama o parser específico (modelo_1 ou modelo_2).
-    - Se o layout vier "desconhecido", tenta os dois parsers em modo fallback.
-    - Sempre devolve:
-        cabecalho, linhas, total_linhas, layout_detectado
-      e, em caso de erro, a chave "erro".
+    # --- NIT ---
+    m = re.search(r"NIT[:\s]*([\d\.\-]+)", texto, re.IGNORECASE)
+    if m:
+        cab["nit"] = so_numeros(m.group(1))
+
+    # --- Nome ---
+    m = re.search(r"Nome[:\s]*([A-ZÇÃÕÂÉÊÍÓÚ ]+)", texto)
+    if m:
+        cab["nome"] = m.group(1).strip()
+
+    # --- Nome da Mãe ---
+    m = re.search(r"Mãe[:\s]*([A-ZÇÃÕÂÉÊÍÓÚ ]+)", texto)
+    if m:
+        cab["nome_mae"] = m.group(1).strip()
+
+    # --- Data de Nascimento ---
+    m = re.search(r"Nasc[:\s]*(\d{2}/\d{2}/\d{4})", texto)
+    if m:
+        nasc = datetime.strptime(m.group(1), "%d/%m/%Y").date()
+        cab["data_nascimento"] = str(nasc)
+
+    # --- CPF ---
+    m = re.search(r"CPF[:\s]*([\d\.\-]+)", texto)
+    if m:
+        cab["cpf"] = so_numeros(m.group(1))
+
+    # ⚠️ NÃO adicionamos profissão e estado aqui!
+    # Eles serão aplicados no main.py após o parser.
+    # cab["profissao"] = ""
+    # cab["estado"] = ""
+
+    return cab
+
+# ============================================================
+# 4. PARSE DAS LINHAS
+# ============================================================
+
+def parse_linhas(texto: str) -> list:
+    """
+    Parser universal simplificado — extrai blocos de linhas do CI GFIP.
+    Cada linha do modelo 2 geralmente já está estruturada.
+    """
+    linhas = []
+    padrao = re.compile(
+        r"(\d{2}/\d{4}).*?(\d{7,14}).*?(\d{3}).*?(\d{3}).*?([0-9\.\,]+).*?([0-9\.\,]+)",
+        re.MULTILINE
+    )
+
+    for m in padrao.finditer(texto):
+        comp = m.group(1)
+        comp_dt = None
+        ano = None
+        mes = None
+
+        try:
+            mes, ano = comp.split("/")
+            comp_dt = f"{ano}-{mes.zfill(2)}-01"
+        except:
+            pass
+
+        linhas.append({
+            "fonte": "GFIP",
+            "competencia_literal": comp,
+            "competencia_date": comp_dt,
+            "competencia_ano": int(ano) if ano else None,
+            "competencia_mes": int(mes) if mes else None,
+            "documento_tomador": m.group(2),
+            "documento_tomador_tipo": "CNPJ_RAIZ",
+            "categoria_codigo": m.group(3),
+            "fpas": m.group(4),
+            "remuneracao_literal": m.group(5),
+            "remuneracao": parse_valor(m.group(5)),
+            "valor_retido_literal": m.group(6),
+            "valor_retido": parse_valor(m.group(6)),
+            "extemporaneo_literal": None,
+            "extemporaneo": None,
+        })
+
+    return linhas
+
+# ============================================================
+# 5. PARSER PRINCIPAL
+# ============================================================
+
+def parse_ci_gfip(texto: str) -> dict:
+    """
+    Parser principal que retorna:
+    - cabecalho (SEM profissão/estado)
+    - linhas
+    - erro, se houver
     """
 
     layout = detectar_layout_ci_gfip(texto)
-    resultado: Dict[str, Any]
+    if layout == "layout_nao_identificado":
+        return {"erro": "layout_nao_identificado"}
 
-    try:
-        # -----------------------------
-        # 1) Caminho normal: layout detectado
-        # -----------------------------
-        if layout == "modelo_2":
-            from .ci_gfip_modelo_2 import parse_ci_gfip_modelo_2
+    cab = parse_cabecalho(texto)
+    linhas = parse_linhas(texto)
 
-            resultado = parse_ci_gfip_modelo_2(texto)
-            resultado = _normalizar_resultado_parser(resultado)
-            resultado["layout_detectado"] = "modelo_2"
-            return resultado
-
-        if layout == "modelo_1":
-            from .ci_gfip_modelo_1 import parse_ci_gfip_modelo_1
-
-            resultado = parse_ci_gfip_modelo_1(texto)
-            resultado = _normalizar_resultado_parser(resultado)
-            resultado["layout_detectado"] = "modelo_1"
-            return resultado
-
-        # -----------------------------
-        # 2) Fallback: layout "desconhecido"
-        #    Tenta modelo_2, depois modelo_1.
-        # -----------------------------
-        from .ci_gfip_modelo_2 import parse_ci_gfip_modelo_2
-        from .ci_gfip_modelo_1 import parse_ci_gfip_modelo_1
-
-        # Tenta modelo_2 primeiro (mais comum hoje).
-        try:
-            tentativa_m2 = parse_ci_gfip_modelo_2(texto)
-            tentativa_m2 = _normalizar_resultado_parser(tentativa_m2)
-
-            if tentativa_m2["total_linhas"] > 0:
-                tentativa_m2["layout_detectado"] = "modelo_2"
-                return tentativa_m2
-        except Exception:
-            # Se der erro interno, simplesmente desconsideramos e seguimos para o próximo.
-            tentativa_m2 = None
-
-        # Tenta modelo_1 em seguida.
-        try:
-            tentativa_m1 = parse_ci_gfip_modelo_1(texto)
-            tentativa_m1 = _normalizar_resultado_parser(tentativa_m1)
-
-            if tentativa_m1["total_linhas"] > 0:
-                tentativa_m1["layout_detectado"] = "modelo_1"
-                return tentativa_m1
-        except Exception:
-            tentativa_m1 = None
-
-        # Se chegou aqui, nenhum parser conseguiu extrair linhas.
-        resultado = {
-            "cabecalho": {},
-            "linhas": [],
-            "total_linhas": 0,
-            "layout_detectado": "desconhecido",
-            "erro": "layout_nao_identificado_ou_sem_linhas",
-        }
-        return resultado
-
-    except Exception as e:
-        # Qualquer erro não tratado cai aqui para não derrubar a API.
-        resultado = {
-            "cabecalho": {},
-            "linhas": [],
-            "total_linhas": 0,
-            "layout_detectado": layout or "desconhecido",
-            "erro": f"erro_parser_universal: {type(e).__name__}: {e}",
-        }
-        return resultado
-
+    return {
+        "cabecalho": cab,
+        "linhas": linhas,
+        "layout_detectado": layout,
+    }
