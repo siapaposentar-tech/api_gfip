@@ -4,6 +4,7 @@ import hashlib
 import tempfile
 from datetime import datetime
 from decimal import Decimal
+import json
 
 import pdfplumber
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
@@ -12,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from parsers.ci_gfip_universal import (
     parse_ci_gfip,
-    detectar_layout_ci_gfip
+    detectar_layout_ci_gfip,
 )
 
 # ============================================
@@ -51,6 +52,105 @@ def so_numeros(valor: str | None) -> str:
 
 def calcular_hash_arquivo(conteudo: bytes) -> str:
     return hashlib.sha256(conteudo).hexdigest()
+
+
+def gerar_hash_conteudo(cabecalho: dict, linhas: list[dict]) -> str:
+    """
+    Gera um hash baseado no CONTEÚDO previdenciário, não no PDF.
+    Dois relatórios com o mesmo conteúdo previdenciário produzem o mesmo hash.
+    """
+
+    cab_norm = {
+        "nome": (cabecalho.get("nome") or "").strip().upper(),
+        "nit": (cabecalho.get("nit") or "").strip(),
+        "data_nascimento": cabecalho.get("data_nascimento"),
+        "nome_mae": (cabecalho.get("nome_mae") or "").strip().upper(),
+    }
+
+    linhas_norm = []
+    for l in linhas:
+        linhas_norm.append(
+            {
+                "ano": l.get("competencia_ano"),
+                "mes": l.get("competencia_mes"),
+                "documento_tomador": l.get("documento_tomador"),
+                "categoria": l.get("categoria_codigo"),
+                "remuneracao": float(l.get("remuneracao") or 0),
+                "extemporaneo": l.get("extemporaneo"),
+            }
+        )
+
+    # Ordena para garantir estabilidade do hash
+    linhas_norm = sorted(
+        linhas_norm,
+        key=lambda x: (x["ano"], x["mes"], x["documento_tomador"]),
+    )
+
+    estrutura = {
+        "cabecalho": cab_norm,
+        "linhas": linhas_norm,
+    }
+
+    txt = json.dumps(estrutura, sort_keys=True)
+    return hashlib.sha256(txt.encode("utf-8")).hexdigest()
+
+
+def comparar_competencias(
+    linhas_antigas: list[dict], linhas_novas: list[dict]
+):
+    """
+    Compara as competências do relatório anterior com o novo relatório.
+
+    Retorna:
+    - complementos: competências novas (não existiam antes)
+    - retificacoes: competências que existiam, mas com valor diferente
+    - iguais: competências idênticas
+    """
+
+    def chave_linha(l: dict):
+        return (
+            l.get("competencia_ano"),
+            l.get("competencia_mes"),
+            l.get("documento_tomador"),
+        )
+
+    mapa_antigas = {chave_linha(l): l for l in linhas_antigas}
+
+    complementos: list[dict] = []
+    retificacoes: list[dict] = []
+    iguais: list[dict] = []
+
+    for l in linhas_novas:
+        chave = chave_linha(l)
+        antiga = mapa_antigas.get(chave)
+
+        if antiga is None:
+            # Competência nova (complemento)
+            complementos.append(l)
+            continue
+
+        antigo_valor = float(antiga.get("remuneracao") or 0)
+        novo_valor = float(l.get("remuneracao") or 0)
+
+        if antigo_valor != novo_valor:
+            # Retificação de competência
+            retificacoes.append(
+                {
+                    "competencia_ano": l.get("competencia_ano"),
+                    "competencia_mes": l.get("competencia_mes"),
+                    "competencia_date": l.get("competencia_date"),
+                    "competencia_literal": l.get("competencia_literal"),
+                    "valor_antigo": antigo_valor,
+                    "valor_novo": novo_valor,
+                    "valor_antigo_literal": antiga.get("remuneracao_literal"),
+                    "valor_novo_literal": l.get("remuneracao_literal"),
+                }
+            )
+        else:
+            # Igual (sem alteração)
+            iguais.append(l)
+
+    return complementos, retificacoes, iguais
 
 
 # ============================================
@@ -104,35 +204,125 @@ def get_or_create_segurado(cab: dict) -> str | None:
 
 
 # ============================================
-# SALVAR RELATÓRIO + LINHAS NO SUPABASE
+# ENDPOINT PRINCIPAL — PROCESSAR CI GFIP
 # ============================================
 
-def salvar_ci_gfip_no_supabase(parser: dict, arquivo_nome: str, arquivo_bytes: bytes, modelo: str):
-
+@app.post("/ci-gfip/processar")
+async def processar_ci_gfip(
+    arquivo: UploadFile = File(...),
+    profissao: str = Form(""),
+    estado: str = Form(""),
+):
     if supabase is None:
-        return None
+        raise HTTPException(
+            status_code=500, detail="Supabase não configurado na API."
+        )
 
-    cab = parser.get("cabecalho", {}) or {}
-    linhas = parser.get("linhas", []) or []
+    conteudo = await arquivo.read()
+    if not conteudo:
+        raise HTTPException(status_code=400, detail="Arquivo PDF vazio.")
 
+    # Arquivo temporário
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(conteudo)
+        caminho_pdf = tmp.name
+
+    # Extração do texto
+    texto = ""
+    with pdfplumber.open(caminho_pdf) as pdf:
+        for pagina in pdf.pages:
+            texto += (pagina.extract_text() or "") + "\n"
+
+    # Detectar layout
+    layout = detectar_layout_ci_gfip(texto)
+
+    # Parse geral
+    resultado = parse_ci_gfip(texto)
+    if resultado.get("erro"):
+        raise HTTPException(400, f"Erro no parser: {resultado['erro']}")
+
+    cab = resultado.get("cabecalho", {}) or {}
+    linhas = resultado.get("linhas", []) or []
+
+    # Aplicar profissão / estado no cabeçalho
+    cab["profissao"] = (profissao or "").strip()
+    cab["estado"] = (estado or "").strip()
+    resultado["cabecalho"] = cab
+
+    # Identificar / criar segurado
     segurado_id = get_or_create_segurado(cab)
     if not segurado_id:
-        return None
+        raise HTTPException(
+            400, "Não foi possível identificar ou criar o segurado."
+        )
 
-    hash_doc = calcular_hash_arquivo(arquivo_bytes)
+    # GERAR HASH DE CONTEÚDO (para detectar duplicidade real)
+    hash_conteudo = gerar_hash_conteudo(cab, linhas)
 
-    # Salvar relatório CI GFIP
+    # Verificar se já existe relatório idêntico para este segurado
+    r_dup = (
+        supabase.table("ci_gfip_relatorios")
+        .select("id")
+        .eq("segurado_id", segurado_id)
+        .eq("hash_conteudo", hash_conteudo)
+        .execute()
+    )
+
+    if r_dup.data:
+        return {
+            "status": "duplicado",
+            "mensagem": "Relatório idêntico já existe para este segurado. Upload ignorado.",
+            "segurado_id": segurado_id,
+            "hash_conteudo": hash_conteudo,
+        }
+
+    # Buscar RELATÓRIO ANTERIOR deste segurado (para comparar competências)
+    rel_ant = (
+        supabase.table("ci_gfip_relatorios")
+        .select("id")
+        .eq("segurado_id", segurado_id)
+        .order("criado_em", desc=True)
+        .limit(1)
+        .execute()
+    )
+
+    linhas_antigas: list[dict] = []
+
+    if rel_ant.data:
+        relatorio_ant_id = rel_ant.data[0]["id"]
+        resp_linhas_ant = (
+            supabase.table("ci_gfip_linhas")
+            .select("*")
+            .eq("relatorio_id", relatorio_ant_id)
+            .execute()
+        )
+        linhas_antigas = resp_linhas_ant.data or []
+
+    # Se existir relatório anterior, comparamos competências
+    complementos: list[dict] = []
+    retificacoes: list[dict] = []
+    iguais: list[dict] = []
+
+    if linhas_antigas:
+        complementos, retificacoes, iguais = comparar_competencias(
+            linhas_antigas, linhas
+        )
+
+    # Salvar novo relatório CI GFIP
+    hash_pdf = calcular_hash_arquivo(conteudo)
+
     resp_rel = (
         supabase.table("ci_gfip_relatorios")
         .insert(
             {
                 "segurado_id": segurado_id,
                 "tipo_relatorio": "ci_gfip",
-                "modelo_relatorio": modelo,
-                "arquivo_storage_path": arquivo_nome,
-                "hash_documento": hash_doc,
-                "profissao": cab.get("profissao"),     # <<<<<<<<<< CORRIGIDO
-                "estado": cab.get("estado"),           # <<<<<<<<<< CORRIGIDO
+                "modelo_relatorio": layout,
+                "arquivo_storage_path": arquivo.filename,
+                "hash_documento": hash_pdf,
+                "hash_conteudo": hash_conteudo,
+                "profissao": cab.get("profissao"),
+                "estado": cab.get("estado"),
             }
         )
         .execute()
@@ -140,7 +330,39 @@ def salvar_ci_gfip_no_supabase(parser: dict, arquivo_nome: str, arquivo_bytes: b
 
     relatorio_id = resp_rel.data[0]["id"]
 
-    # Inserção das linhas
+    # Registrar COMPLEMENTAÇÕES (se houver relatório anterior)
+    for c in complementos:
+        supabase.table("ci_gfip_complementacoes").insert(
+            {
+                "segurado_id": segurado_id,
+                "relatorio_id": relatorio_id,
+                "competencia_ano": c.get("competencia_ano"),
+                "competencia_mes": c.get("competencia_mes"),
+                "competencia_date": c.get("competencia_date"),
+                "competencia_literal": c.get("competencia_literal"),
+                "valor": c.get("remuneracao"),
+                "valor_literal": c.get("remuneracao_literal"),
+            }
+        ).execute()
+
+    # Registrar RETIFICAÇÕES
+    for r in retificacoes:
+        supabase.table("ci_gfip_retificacoes").insert(
+            {
+                "segurado_id": segurado_id,
+                "relatorio_id": relatorio_id,
+                "competencia_ano": r.get("competencia_ano"),
+                "competencia_mes": r.get("competencia_mes"),
+                "competencia_date": r.get("competencia_date"),
+                "competencia_literal": r.get("competencia_literal"),
+                "valor_antigo": r.get("valor_antigo"),
+                "valor_novo": r.get("valor_novo"),
+                "valor_antigo_literal": r.get("valor_antigo_literal"),
+                "valor_novo_literal": r.get("valor_novo_literal"),
+            }
+        ).execute()
+
+    # Inserir todas as linhas deste novo relatório
     linhas_insert = []
 
     for l in linhas:
@@ -175,68 +397,15 @@ def salvar_ci_gfip_no_supabase(parser: dict, arquivo_nome: str, arquivo_bytes: b
         supabase.table("ci_gfip_linhas").insert(linhas_insert).execute()
 
     return {
-        "segurado_id": segurado_id,
-        "relatorio_id": relatorio_id,
-        "linhas_salvas": len(linhas_insert),
-    }
-
-
-# ============================================
-# ENDPOINT PRINCIPAL — PROCESSAR CI GFIP
-# ============================================
-
-@app.post("/ci-gfip/processar")
-async def processar_ci_gfip(
-    arquivo: UploadFile = File(...),
-    profissao: str = Form(""),
-    estado: str = Form(""),
-):
-
-    conteudo = await arquivo.read()
-
-    if not conteudo:
-        raise HTTPException(status_code=400, detail="Arquivo PDF vazio.")
-
-    # Arquivo temporário
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(conteudo)
-        caminho_pdf = tmp.name
-
-    # Extração do texto
-    texto = ""
-    with pdfplumber.open(caminho_pdf) as pdf:
-        for pagina in pdf.pages:
-            texto += (pagina.extract_text() or "") + "\n"
-
-    # Detectar layout
-    layout = detectar_layout_ci_gfip(texto)
-
-    # Parse geral
-    resultado = parse_ci_gfip(texto)
-
-    if resultado.get("erro"):
-        raise HTTPException(400, f"Erro no parser: {resultado['erro']}")
-
-    # Aplicar profissão / estado no cabeçalho
-    cab = resultado.get("cabecalho", {})
-    cab["profissao"] = profissao.strip()
-    cab["estado"] = estado.strip()
-    resultado["cabecalho"] = cab
-
-    # Salvar Supabase
-    info_supabase = salvar_ci_gfip_no_supabase(
-        parser=resultado,
-        arquivo_nome=arquivo.filename,
-        arquivo_bytes=conteudo,
-        modelo=layout,
-    )
-
-    return {
-        "status": "sucesso",
+        "status": "processado",
         "mensagem": "CI GFIP processada com sucesso.",
         "layout_detectado": layout,
         "cabecalho": resultado.get("cabecalho"),
-        "total_linhas": len(resultado.get("linhas", [])),
+        "total_linhas": len(linhas),
         "arquivo": arquivo.filename,
-        "supabase": info_supabase,
+        "segurado_id": segurado_id,
+        "relatorio_id": relatorio_id,
+        "complementos": len(complementos),
+        "retificacoes": len(retificacoes),
+        "iguais": len(iguais),
     }
