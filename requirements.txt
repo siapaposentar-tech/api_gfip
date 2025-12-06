@@ -3,3 +3,4 @@ uvicorn[standard]
 python-multipart
 pdfplumber
 supabase
+requests==2.32.3
