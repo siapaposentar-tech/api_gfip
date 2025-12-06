@@ -100,7 +100,7 @@ def normalizar_documento_tomador(valor: str | None):
 
 
 # ============================================================
-# 3. CABEÇALHO
+# 3. CABEÇALHO — CAPTURA COMPLETA E CORRIGIDA
 # ============================================================
 
 def parse_cabecalho(texto: str) -> dict:
@@ -122,12 +122,16 @@ def parse_cabecalho(texto: str) -> dict:
     if m:
         cab["nome"] = m.group(1).strip()
 
-    # NOME DA MÃE
-    m = re.search(r"M[ÃA]E[:\s]*([A-ZÁÉÍÓÚÀÂÊÔÃÕÇ ]+)", texto)
+    # NOME DA MÃE — CORRIGIDO
+    m = re.search(
+        r"(NOME\s+DA\s+M[ÃA]E|M[ÃA]E)[:\s]*([A-ZÁÉÍÓÚÀÂÊÔÃÕÇ ]+)",
+        texto,
+        re.IGNORECASE
+    )
     if m:
-        cab["nome_mae"] = m.group(1).strip()
+        cab["nome_mae"] = m.group(2).strip()
 
-    # DATA DE NASCIMENTO – VERSÃO COMPLETA E ROBUSTA
+    # DATA DE NASCIMENTO — CORRIGIDO
     m = re.search(
         r"(DATA DE NASCIMENTO|NASCIMENTO|NASC\.?|NASC|DT\.? NASC)[\s:]*"
         r"(\d{2}/\d{2}/\d{4})",
@@ -138,7 +142,7 @@ def parse_cabecalho(texto: str) -> dict:
         data = m.group(2)
         cab["data_nascimento"] = str(datetime.strptime(data, "%d/%m/%Y").date())
 
-    # CPF – se existir (alguns CIs não têm)
+    # CPF — se existir
     m = re.search(r"CPF[:\s]*([\d\.\-]+)", texto)
     if m:
         cab["cpf"] = so_numeros(m.group(1))
@@ -236,7 +240,7 @@ def _linhas_modelo_2(texto: str) -> List[Dict]:
                 valor_retido_txt = partes[10]
                 extemp_txt       = partes[11]
 
-            # Fallback – linhas híbridas
+            # Fallback híbrido
             elif len(partes) >= 9:
                 nit_raw          = partes[1]
                 competencia      = partes[2]
@@ -307,6 +311,7 @@ def parse_ci_gfip(texto: str) -> dict:
         }
 
     if layout == "modelo_1":
+        # Implementaremos depois
         return {"erro": "modelo_1_ainda_nao_implementado"}
 
     return {"erro": "layout_nao_identificado"}
