@@ -112,22 +112,33 @@ def parse_cabecalho(texto: str) -> dict:
         "cpf": None,
     }
 
+    # NIT
     m = re.search(r"NIT[:\s]*([\d\.\-]+)", texto, re.IGNORECASE)
     if m:
         cab["nit"] = so_numeros(m.group(1))
 
+    # NOME
     m = re.search(r"Nome[:\s]*([A-ZÁÉÍÓÚÀÂÊÔÃÕÇ ]+)", texto)
     if m:
         cab["nome"] = m.group(1).strip()
 
-    m = re.search(r"M[ãa]e[:\s]*([A-ZÁÉÍÓÚÀÂÊÔÃÕÇ ]+)", texto)
+    # NOME DA MÃE
+    m = re.search(r"M[ÃA]E[:\s]*([A-ZÁÉÍÓÚÀÂÊÔÃÕÇ ]+)", texto)
     if m:
         cab["nome_mae"] = m.group(1).strip()
 
-    m = re.search(r"Nasc[:\s]*(\d{2}/\d{2}/\d{4})", texto)
+    # DATA DE NASCIMENTO – VERSÃO COMPLETA E ROBUSTA
+    m = re.search(
+        r"(DATA DE NASCIMENTO|NASCIMENTO|NASC\.?|NASC|DT\.? NASC)[\s:]*"
+        r"(\d{2}/\d{2}/\d{4})",
+        texto,
+        re.IGNORECASE
+    )
     if m:
-        cab["data_nascimento"] = str(datetime.strptime(m.group(1), "%d/%m/%Y").date())
+        data = m.group(2)
+        cab["data_nascimento"] = str(datetime.strptime(data, "%d/%m/%Y").date())
 
+    # CPF – se existir (alguns CIs não têm)
     m = re.search(r"CPF[:\s]*([\d\.\-]+)", texto)
     if m:
         cab["cpf"] = so_numeros(m.group(1))
@@ -150,7 +161,7 @@ def _linhas_modelo_2(texto: str) -> List[Dict]:
 
         up = linha.upper()
 
-        # Início da tabela
+        # INÍCIO DA TABELA
         if "FONTE" in up and "NIT" in up and "COMPET" in up:
             in_table = True
             continue
@@ -183,59 +194,59 @@ def _linhas_modelo_2(texto: str) -> List[Dict]:
             valor_retido_txt = ""
             extemp_txt = ""
 
-            # GFIP novo – 13 colunas
+            # GFIP novo (13 colunas)
             if fonte == "GFIP" and len(partes) >= 13:
                 numero_documento = partes[1]
-                nit_raw = partes[2]
-                competencia = partes[3]
-                doc_tomador_raw = partes[4]
-                fpas = partes[5]
-                categoria = partes[6]
-                codigo_gfip = partes[7]
-                data_envio_lit = partes[8]
-                tipo_rem = partes[9]
-                remun_txt = partes[10]
+                nit_raw          = partes[2]
+                competencia      = partes[3]
+                doc_tomador_raw  = partes[4]
+                fpas             = partes[5]
+                categoria        = partes[6]
+                codigo_gfip      = partes[7]
+                data_envio_lit   = partes[8]
+                tipo_rem         = partes[9]
+                remun_txt        = partes[10]
                 valor_retido_txt = partes[11]
-                extemp_txt = partes[12]
+                extemp_txt       = partes[12]
 
-            # GFIP antigo – 11 colunas (ex: MARCOS)
+            # GFIP antigo (11 colunas)
             elif fonte == "GFIP" and len(partes) == 11:
-                nit_raw = partes[1]
-                competencia = partes[2]
-                doc_tomador_raw = partes[3]
-                fpas = partes[4]
-                categoria = partes[5]
-                codigo_gfip = partes[6]
-                data_envio_lit = partes[7]
-                remun_txt = partes[8]
+                nit_raw          = partes[1]
+                competencia      = partes[2]
+                doc_tomador_raw  = partes[3]
+                fpas             = partes[4]
+                categoria        = partes[5]
+                codigo_gfip      = partes[6]
+                data_envio_lit   = partes[7]
+                remun_txt        = partes[8]
                 valor_retido_txt = partes[9]
-                extemp_txt = partes[10]
+                extemp_txt       = partes[10]
 
-            # eSocial – 12 colunas
+            # eSocial (12 colunas)
             elif fonte == "ESOCIAL" and len(partes) >= 12:
                 numero_documento = partes[1]
-                nit_raw = partes[2]
-                competencia = partes[3]
-                doc_tomador_raw = partes[4]
-                fpas = partes[5]
-                categoria = partes[6]
-                data_envio_lit = partes[7]
-                tipo_rem = partes[8]
-                remun_txt = partes[9]
+                nit_raw          = partes[2]
+                competencia      = partes[3]
+                doc_tomador_raw  = partes[4]
+                fpas             = partes[5]
+                categoria        = partes[6]
+                data_envio_lit   = partes[7]
+                tipo_rem         = partes[8]
+                remun_txt        = partes[9]
                 valor_retido_txt = partes[10]
-                extemp_txt = partes[11]
+                extemp_txt       = partes[11]
 
             # Fallback – linhas híbridas
             elif len(partes) >= 9:
-                nit_raw = partes[1]
-                competencia = partes[2]
-                doc_tomador_raw = partes[3]
-                fpas = partes[4]
-                categoria = partes[5]
-                data_envio_lit = partes[6]
-                remun_txt = partes[7]
+                nit_raw          = partes[1]
+                competencia      = partes[2]
+                doc_tomador_raw  = partes[3]
+                fpas             = partes[4]
+                categoria        = partes[5]
+                data_envio_lit   = partes[6]
+                remun_txt        = partes[7]
                 valor_retido_txt = partes[8]
-                extemp_txt = partes[9] if len(partes) > 9 else ""
+                extemp_txt       = partes[9] if len(partes) > 9 else ""
 
             else:
                 continue
@@ -296,7 +307,6 @@ def parse_ci_gfip(texto: str) -> dict:
         }
 
     if layout == "modelo_1":
-        # Será implementado depois
         return {"erro": "modelo_1_ainda_nao_implementado"}
 
     return {"erro": "layout_nao_identificado"}
