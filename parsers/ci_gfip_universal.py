@@ -1,10 +1,10 @@
 import re
 from datetime import datetime
 from decimal import Decimal
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 # ============================================================
-# 1. DETECTAR LAYOUT
+# 1. DETECTAR LAYOUT AUTOMATICAMENTE
 # ============================================================
 
 def detectar_layout_ci_gfip(texto: str) -> str:
@@ -13,19 +13,25 @@ def detectar_layout_ci_gfip(texto: str) -> str:
     Retorna: "modelo_1", "modelo_2" ou "layout_nao_identificado".
     """
 
-    # Modelo 1 (SEFIP clássico)
-    if "COMPETÊNCIA" in texto.upper() and "FPAS" in texto.upper():
-        return "modelo_1"
+    up = texto.upper()
 
-    # Modelo 2 (Consulta Valores / GFIP / eSocial)
-    if "CONSULTA VALORES" in texto.upper() or "eSOCIAL" in texto or "VALOR RETIDO" in texto:
+    # PRIORIDADE ABSOLUTA: CONSULTA VALORES CI GFIP/eSocial/INSS → modelo_2
+    if "CONSULTA VALORES" in up or "CI GFIP/ESOCIAL/INSS" in up:
         return "modelo_2"
+
+    # Cabeçalho típico do modelo_2
+    if "FONTE" in up and "NIT" in up and "COMPET" in up:
+        return "modelo_2"
+
+    # Modelo 1 (SEFIP tradicional)
+    if "COMPETÊNCIA" in up and "FPAS" in up:
+        return "modelo_1"
 
     return "layout_nao_identificado"
 
 
 # ============================================================
-# 2. FUNÇÕES AUXILIARES
+# 2. FUNÇÕES DE NORMALIZAÇÃO
 # ============================================================
 
 def so_numeros(valor: str | None) -> str:
@@ -94,7 +100,7 @@ def normalizar_documento_tomador(valor: str | None):
 
 
 # ============================================================
-# 3. PARSE DO CABEÇALHO
+# 3. CABEÇALHO
 # ============================================================
 
 def parse_cabecalho(texto: str) -> dict:
@@ -120,8 +126,7 @@ def parse_cabecalho(texto: str) -> dict:
 
     m = re.search(r"Nasc[:\s]*(\d{2}/\d{2}/\d{4})", texto)
     if m:
-        nasc = datetime.strptime(m.group(1), "%d/%m/%Y").date()
-        cab["data_nascimento"] = str(nasc)
+        cab["data_nascimento"] = str(datetime.strptime(m.group(1), "%d/%m/%Y").date())
 
     m = re.search(r"CPF[:\s]*([\d\.\-]+)", texto)
     if m:
@@ -131,17 +136,10 @@ def parse_cabecalho(texto: str) -> dict:
 
 
 # ============================================================
-# 4. PARSER UNIVERSAL – MODELO 2 COMPLETO
+# 4. PARSER UNIVERSAL – MODELO 2
 # ============================================================
 
 def _linhas_modelo_2(texto: str) -> List[Dict]:
-    """
-    Universal para:
-    - GFIP novo (13 colunas)
-    - eSocial (12 colunas)
-    - GFIP clássico (11 colunas)
-    """
-
     linhas: List[Dict] = []
     in_table = False
 
@@ -152,19 +150,15 @@ def _linhas_modelo_2(texto: str) -> List[Dict]:
 
         up = linha.upper()
 
-        if (
-            "FONTE" in up
-            and "NIT" in up
-            and "COMPET" in up
-            and "VALOR" in up
-        ):
+        # Início da tabela
+        if "FONTE" in up and "NIT" in up and "COMPET" in up:
             in_table = True
             continue
 
         if not in_table:
             continue
 
-        if linha.startswith("PAG") or linha.startswith("Página"):
+        if linha.startswith("PÁG") or linha.startswith("PAG") or linha.startswith("Página"):
             continue
 
         partes = linha.split()
@@ -189,73 +183,63 @@ def _linhas_modelo_2(texto: str) -> List[Dict]:
             valor_retido_txt = ""
             extemp_txt = ""
 
-            # ============================
-            # GFIP NOVO - 13 colunas
-            # ============================
+            # GFIP novo – 13 colunas
             if fonte == "GFIP" and len(partes) >= 13:
                 numero_documento = partes[1]
-                nit_raw          = partes[2]
-                competencia      = partes[3]
-                doc_tomador_raw  = partes[4]
-                fpas             = partes[5]
-                categoria        = partes[6]
-                codigo_gfip      = partes[7]
-                data_envio_lit   = partes[8]
-                tipo_rem         = partes[9]
-                remun_txt        = partes[10]
+                nit_raw = partes[2]
+                competencia = partes[3]
+                doc_tomador_raw = partes[4]
+                fpas = partes[5]
+                categoria = partes[6]
+                codigo_gfip = partes[7]
+                data_envio_lit = partes[8]
+                tipo_rem = partes[9]
+                remun_txt = partes[10]
                 valor_retido_txt = partes[11]
-                extemp_txt       = partes[12]
+                extemp_txt = partes[12]
 
-            # ============================
-            # GFIP ANTIGO - 11 colunas
-            # (CASO DO MARCOS)
-            # ============================
+            # GFIP antigo – 11 colunas (ex: MARCOS)
             elif fonte == "GFIP" and len(partes) == 11:
-                nit_raw          = partes[1]
-                competencia      = partes[2]
-                doc_tomador_raw  = partes[3]
-                fpas             = partes[4]
-                categoria        = partes[5]
-                codigo_gfip      = partes[6]
-                data_envio_lit   = partes[7]
-                remun_txt        = partes[8]
+                nit_raw = partes[1]
+                competencia = partes[2]
+                doc_tomador_raw = partes[3]
+                fpas = partes[4]
+                categoria = partes[5]
+                codigo_gfip = partes[6]
+                data_envio_lit = partes[7]
+                remun_txt = partes[8]
                 valor_retido_txt = partes[9]
-                extemp_txt       = partes[10]
+                extemp_txt = partes[10]
 
-            # ============================
-            # ESOCIAL – 12 colunas
-            # ============================
+            # eSocial – 12 colunas
             elif fonte == "ESOCIAL" and len(partes) >= 12:
                 numero_documento = partes[1]
-                nit_raw          = partes[2]
-                competencia      = partes[3]
-                doc_tomador_raw  = partes[4]
-                fpas             = partes[5]
-                categoria        = partes[6]
-                data_envio_lit   = partes[7]
-                tipo_rem         = partes[8]
-                remun_txt        = partes[9]
+                nit_raw = partes[2]
+                competencia = partes[3]
+                doc_tomador_raw = partes[4]
+                fpas = partes[5]
+                categoria = partes[6]
+                data_envio_lit = partes[7]
+                tipo_rem = partes[8]
+                remun_txt = partes[9]
                 valor_retido_txt = partes[10]
-                extemp_txt       = partes[11]
+                extemp_txt = partes[11]
 
-            # ============================
-            # FALLBACK – linhas híbridas
-            # ============================
+            # Fallback – linhas híbridas
             elif len(partes) >= 9:
-                nit_raw          = partes[1]
-                competencia      = partes[2]
-                doc_tomador_raw  = partes[3]
-                fpas             = partes[4]
-                categoria        = partes[5]
-                data_envio_lit   = partes[6]
-                remun_txt        = partes[7]
+                nit_raw = partes[1]
+                competencia = partes[2]
+                doc_tomador_raw = partes[3]
+                fpas = partes[4]
+                categoria = partes[5]
+                data_envio_lit = partes[6]
+                remun_txt = partes[7]
                 valor_retido_txt = partes[8]
-                extemp_txt       = partes[9] if len(partes) > 9 else ""
+                extemp_txt = partes[9] if len(partes) > 9 else ""
 
             else:
                 continue
 
-            # Normalizações universais
             comp_date, comp_literal = normalizar_competencia(competencia)
             data_envio_date, data_envio_literal = normalizar_data(data_envio_lit)
             remuneracao, remuneracao_literal = normalizar_moeda(remun_txt)
@@ -302,17 +286,17 @@ def _linhas_modelo_2(texto: str) -> List[Dict]:
 def parse_ci_gfip(texto: str) -> dict:
     layout = detectar_layout_ci_gfip(texto)
 
-    if layout == "modelo_1":
-        return {"erro": "modelo_1_ainda_nao_implementado"}
-
     if layout == "modelo_2":
         cab = parse_cabecalho(texto)
         linhas = _linhas_modelo_2(texto)
-
         return {
             "cabecalho": cab,
             "linhas": linhas,
             "layout_detectado": layout,
         }
+
+    if layout == "modelo_1":
+        # Será implementado depois
+        return {"erro": "modelo_1_ainda_nao_implementado"}
 
     return {"erro": "layout_nao_identificado"}
