@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 
 import pdfplumber
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 
 from supabase import create_client, Client
@@ -53,17 +53,6 @@ def calcular_hash_arquivo(conteudo: bytes) -> str:
     return hashlib.sha256(conteudo).hexdigest()
 
 
-def to_bool(value: str | None):
-    if not value:
-        return None
-    txt = value.strip().lower()
-    if txt == "sim":
-        return True
-    if txt in ["não", "nao"]:
-        return False
-    return None
-
-
 # ============================================
 # SEGURADOS
 # ============================================
@@ -78,7 +67,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
     if not nome:
         return None
 
-    # Busca segurado por NIT
+    # Busca segurado por NIT nos NITs armazenados
     if nit:
         r = (
             supabase.table("ci_gfip_segurado_nits")
@@ -89,7 +78,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
         if r.data:
             return r.data[0]["segurado_id"]
 
-    # Cria segurado
+    # Criar segurado
     resp = (
         supabase.table("ci_gfip_segurados")
         .insert(
@@ -105,6 +94,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
 
     segurado_id = resp.data[0]["id"]
 
+    # Registrar NIT
     if nit:
         supabase.table("ci_gfip_segurado_nits").insert(
             {"segurado_id": segurado_id, "nit": nit}
@@ -114,7 +104,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
 
 
 # ============================================
-# SALVAR NO SUPABASE
+# SALVAR RELATÓRIO + LINHAS NO SUPABASE
 # ============================================
 
 def salvar_ci_gfip_no_supabase(parser: dict, arquivo_nome: str, arquivo_bytes: bytes, modelo: str):
@@ -122,7 +112,6 @@ def salvar_ci_gfip_no_supabase(parser: dict, arquivo_nome: str, arquivo_bytes: b
     if supabase is None:
         return None
 
-    # Cabeçalho + Linhas
     cab = parser.get("cabecalho", {}) or {}
     linhas = parser.get("linhas", []) or []
 
@@ -132,7 +121,7 @@ def salvar_ci_gfip_no_supabase(parser: dict, arquivo_nome: str, arquivo_bytes: b
 
     hash_doc = calcular_hash_arquivo(arquivo_bytes)
 
-    # Salva relatório
+    # Salvar relatório CI GFIP
     resp_rel = (
         supabase.table("ci_gfip_relatorios")
         .insert(
@@ -142,8 +131,8 @@ def salvar_ci_gfip_no_supabase(parser: dict, arquivo_nome: str, arquivo_bytes: b
                 "modelo_relatorio": modelo,
                 "arquivo_storage_path": arquivo_nome,
                 "hash_documento": hash_doc,
-                "profissao": cab.get("profissao"),
-                "estado": cab.get("estado"),
+                "profissao": cab.get("profissao"),     # <<<<<<<<<< CORRIGIDO
+                "estado": cab.get("estado"),           # <<<<<<<<<< CORRIGIDO
             }
         )
         .execute()
@@ -151,48 +140,32 @@ def salvar_ci_gfip_no_supabase(parser: dict, arquivo_nome: str, arquivo_bytes: b
 
     relatorio_id = resp_rel.data[0]["id"]
 
-    # Insere linhas
+    # Inserção das linhas
     linhas_insert = []
 
     for l in linhas:
         linhas_insert.append(
             {
                 "relatorio_id": relatorio_id,
-
-                # Campos padrão
                 "fonte": l.get("fonte"),
                 "nit": l.get("nit"),
-
-                # Competência
                 "competencia_literal": l.get("competencia_literal"),
                 "competencia_date": l.get("competencia_date"),
                 "competencia_ano": l.get("competencia_ano"),
                 "competencia_mes": l.get("competencia_mes"),
-
-                # Tomador
                 "documento_tomador": l.get("documento_tomador"),
                 "documento_tomador_tipo": l.get("documento_tomador_tipo") or "",
-
-                # FPAS / Categoria / Código GFIP
                 "fpas": l.get("fpas"),
                 "categoria_codigo": l.get("categoria_codigo"),
                 "codigo_gfip": l.get("codigo_gfip"),
-
-                # Datas
                 "data_envio_literal": l.get("data_envio_literal"),
                 "data_envio_date": l.get("data_envio_date"),
-
-                # Campos novos do parser universal
                 "numero_documento": l.get("numero_documento"),
                 "tipo_remuneracao": l.get("tipo_remuneracao"),
-
-                # Valores
                 "remuneracao_literal": l.get("remuneracao_literal"),
                 "remuneracao": l.get("remuneracao"),
                 "valor_retido_literal": l.get("valor_retido_literal"),
                 "valor_retido": l.get("valor_retido"),
-
-                # Extemporâneo
                 "extemporaneo_literal": l.get("extemporaneo_literal"),
                 "extemporaneo": l.get("extemporaneo"),
             }
@@ -209,14 +182,14 @@ def salvar_ci_gfip_no_supabase(parser: dict, arquivo_nome: str, arquivo_bytes: b
 
 
 # ============================================
-# ROTA PRINCIPAL
+# ENDPOINT PRINCIPAL — PROCESSAR CI GFIP
 # ============================================
 
 @app.post("/ci-gfip/processar")
 async def processar_ci_gfip(
     arquivo: UploadFile = File(...),
-    profissao: str = "",
-    estado: str = "",
+    profissao: str = Form(""),
+    estado: str = Form(""),
 ):
 
     conteudo = await arquivo.read()
@@ -229,7 +202,7 @@ async def processar_ci_gfip(
         tmp.write(conteudo)
         caminho_pdf = tmp.name
 
-    # Extração de texto
+    # Extração do texto
     texto = ""
     with pdfplumber.open(caminho_pdf) as pdf:
         for pagina in pdf.pages:
@@ -241,17 +214,16 @@ async def processar_ci_gfip(
     # Parse geral
     resultado = parse_ci_gfip(texto)
 
-    # Tratamento de erro do parser
     if resultado.get("erro"):
         raise HTTPException(400, f"Erro no parser: {resultado['erro']}")
 
-    # Aplicar profissão / estado
+    # Aplicar profissão / estado no cabeçalho
     cab = resultado.get("cabecalho", {})
     cab["profissao"] = profissao.strip()
     cab["estado"] = estado.strip()
     resultado["cabecalho"] = cab
 
-    # Salvar no Supabase
+    # Salvar Supabase
     info_supabase = salvar_ci_gfip_no_supabase(
         parser=resultado,
         arquivo_nome=arquivo.filename,
