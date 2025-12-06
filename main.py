@@ -2,8 +2,7 @@ import re
 import os
 import hashlib
 import tempfile
-from datetime import datetime
-from decimal import Decimal
+import requests
 
 import pdfplumber
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
@@ -42,7 +41,7 @@ if SUPABASE_URL and SUPABASE_KEY:
 
 
 # ============================================
-# HELPERS
+# HELPERS GERAIS
 # ============================================
 
 def so_numeros(valor: str | None) -> str:
@@ -53,80 +52,36 @@ def calcular_hash_arquivo(conteudo: bytes) -> str:
     return hashlib.sha256(conteudo).hexdigest()
 
 
-def normalizar_linha_para_comparacao(linha: dict) -> tuple:
-    """
-    Transforma uma linha da GFIP em tupla ordenável para comparação.
-    Ignora campos que não definem a competência em si.
-    """
-    return (
-        linha.get("competencia_ano"),
-        linha.get("competencia_mes"),
-        linha.get("competencia_literal"),
-        linha.get("documento_tomador"),
-        linha.get("categoria_codigo"),
-        linha.get("codigo_gfip"),
-        linha.get("remuneracao"),
-        linha.get("valor_retido"),
-        linha.get("extemporaneo"),
-    )
-
-
-def conjuntos_sao_iguais(linhas1: list, linhas2: list) -> bool:
-    """
-    Verifica se dois conjuntos de competências são idênticos.
-    """
-    set1 = {normalizar_linha_para_comparacao(x) for x in linhas1}
-    set2 = {normalizar_linha_para_comparacao(x) for x in linhas2}
-    return set1 == set2
-
-
 # ============================================
-# DUPLICIDADE POR CONTEÚDO
+# CONSULTA À BRASILAPI
 # ============================================
 
-def relatorio_ja_existe_por_conteudo(segurado_id: str, novas_linhas: list) -> dict | None:
+def consultar_brasilapi_cnpj(cnpj: str) -> dict | None:
     """
-    Verifica se já existe um relatório com o mesmo conteúdo (duplicado)
-    ou se existe um relatório com diferenças (complemento / retificador).
+    Consulta o CNPJ na BrasilAPI.
+    Retorna None se a API falhar ou o CNPJ estiver inválido.
     """
+    try:
+        url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}"
+        resp = requests.get(url, timeout=10)
 
-    if supabase is None:
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        return {
+            "razao_social": data.get("razao_social"),
+            "nome_fantasia": data.get("nome_fantasia"),
+            "cnae_principal": data.get("cnae_fiscal_descricao"),
+            "natureza_juridica": data.get("natureza_juridica"),
+            "endereco": f"{data.get('logradouro', '')}, {data.get('numero', '')}, {data.get('bairro', '')}, {data.get('municipio', '')}-{data.get('uf', '')}, CEP {data.get('cep', '')}",
+            "telefone": data.get("telefone"),
+            "situacao_cadastral": data.get("situacao_cadastral"),
+            "data_abertura": data.get("data_inicio_atividade"),
+        }
+
+    except:
         return None
-
-    # Buscar relatórios existentes deste segurado
-    resp = (
-        supabase.table("ci_gfip_relatorios")
-        .select("id")
-        .eq("segurado_id", segurado_id)
-        .order("criado_em", desc=False)
-        .execute()
-    )
-
-    relatorios = resp.data or []
-
-    for rel in relatorios:
-        rel_id = rel["id"]
-
-        # Buscar linhas deste relatório
-        linhas_antigas = (
-            supabase.table("ci_gfip_linhas")
-            .select(
-                "competencia_ano, competencia_mes, competencia_literal, "
-                "documento_tomador, categoria_codigo, codigo_gfip, "
-                "remuneracao, valor_retido, extemporaneo"
-            )
-            .eq("relatorio_id", rel_id)
-            .execute()
-        ).data or []
-
-        # Comparação de duplicidade
-        if conjuntos_sao_iguais(linhas_antigas, novas_linhas):
-            return {
-                "status": "duplicado",
-                "relatorio_id": rel_id
-            }
-
-    return {"status": "novo"}
 
 
 # ============================================
@@ -143,7 +98,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
     if not nome:
         return None
 
-    # Buscar segurado por NITs adicionais
+    # Busca segurado pelos NITs adicionais
     if nit:
         r = (
             supabase.table("ci_gfip_segurado_nits")
@@ -181,8 +136,143 @@ def get_or_create_segurado(cab: dict) -> str | None:
 
 
 # ============================================
-# SALVAR RELATÓRIO NO SUPABASE
+# EMPRESAS (CNPJ / RAIZ / DOMÉSTICO)
 # ============================================
+
+def classificar_documento_tomador(doc_bruto: str | None) -> dict | None:
+    if not doc_bruto:
+        return None
+
+    doc = so_numeros(doc_bruto)
+    if not doc:
+        return None
+
+    if len(doc) == 11:
+        return {
+            "tipo": "empregador_domestico",
+            "cnpj_raiz": doc,
+            "cnpj_completo": None,
+        }
+
+    if len(doc) == 14:
+        return {
+            "tipo": "cnpj_completo",
+            "cnpj_raiz": doc[:8],
+            "cnpj_completo": doc,
+        }
+
+    if len(doc) == 8:
+        return {
+            "tipo": "cnpj_raiz",
+            "cnpj_raiz": doc,
+            "cnpj_completo": None,
+        }
+
+    return None
+
+
+def get_or_create_empresa(doc_tomador: str | None) -> str | None:
+    if supabase is None:
+        return None
+
+    info = classificar_documento_tomador(doc_tomador)
+    if not info:
+        return None
+
+    tipo = info["tipo"]
+    raiz = info["cnpj_raiz"]
+    cnpj_completo = info["cnpj_completo"]
+
+    # Buscar empresa pela raiz
+    resp = (
+        supabase.table("ci_gfip_empresas")
+        .select("*")
+        .eq("cnpj_raiz", raiz)
+        .limit(1)
+        .execute()
+    )
+    dados = resp.data or []
+
+    # Caso a empresa já exista
+    if dados:
+        empresa = dados[0]
+        updates = {}
+
+        # Se vier CNPJ completo pela primeira vez
+        if tipo == "cnpj_completo":
+            ordem = cnpj_completo[8:12]
+
+            if not empresa.get("cnpj_completo"):
+                updates["cnpj_completo"] = cnpj_completo
+
+            if ordem == "0001":  # matriz
+                updates["tipo_empresa"] = "matriz"
+                updates["cnpj_referencia"] = cnpj_completo
+            else:  # filial
+                if not empresa.get("cnpj_referencia"):
+                    updates["cnpj_referencia"] = cnpj_completo
+                updates["tipo_empresa"] = "filial"
+
+            # CONSULTA BRASILAPI
+            enriched = consultar_brasilapi_cnpj(cnpj_completo)
+            if enriched:
+                for campo, valor in enriched.items():
+                    if valor:
+                        updates[campo] = valor
+
+        if updates:
+            updates["atualizado_em"] = "now()"
+            supabase.table("ci_gfip_empresas").update(updates).eq("id", empresa["id"]).execute()
+
+        return empresa["id"]
+
+    # Criar nova empresa (nunca existiu)
+    insert_data = {
+        "cnpj_raiz": raiz,
+        "cnpj_completo": cnpj_completo,
+        "tipo_empresa": "nao_identificada",
+        "status": "ativa",
+        "cnpj_referencia": None,
+    }
+
+    if tipo == "cnpj_completo":
+        ordem = cnpj_completo[8:12]
+        insert_data["cnpj_referencia"] = cnpj_completo
+
+        if ordem == "0001":
+            insert_data["tipo_empresa"] = "matriz"
+        else:
+            insert_data["tipo_empresa"] = "filial"
+
+        # CONSULTA BRASILAPI
+        enriched = consultar_brasilapi_cnpj(cnpj_completo)
+        if enriched:
+            for campo, valor in enriched.items():
+                insert_data[campo] = valor
+
+    elif tipo == "cnpj_raiz":
+        insert_data["tipo_empresa"] = "raiz_incompleta"
+        insert_data["status"] = "provisoria"
+
+    elif tipo == "empregador_domestico":
+        insert_data["tipo_empresa"] = "empregador_domestico"
+        insert_data["status"] = "ativa"
+
+    # Inserir empresa nova
+    resp_new = (
+        supabase.table("ci_gfip_empresas")
+        .insert(insert_data)
+        .execute()
+    )
+
+    return resp_new.data[0]["id"] if resp_new.data else None
+
+
+# ============================================
+# VÍNCULOS + LINHAS
+# ============================================
+
+from datetime import date
 
 def salvar_relatorio_completo(parser: dict, arquivo_nome: str, arquivo_bytes: bytes, modelo: str):
 
@@ -190,20 +280,8 @@ def salvar_relatorio_completo(parser: dict, arquivo_nome: str, arquivo_bytes: by
     linhas = parser.get("linhas", []) or []
 
     segurado_id = get_or_create_segurado(cab)
-    if not segurado_id:
-        return None
 
-    # DUPLICIDADE POR CONTEÚDO
-    check = relatorio_ja_existe_por_conteudo(segurado_id, linhas)
-
-    if check and check["status"] == "duplicado":
-        return {
-            "status": "duplicado",
-            "mensagem": "Relatório já existe — nenhuma ação necessária.",
-            "relatorio_existente_id": check["relatorio_id"]
-        }
-
-    # SALVAR RELATÓRIO NOVO
+    # Salvar relatório
     hash_doc = calcular_hash_arquivo(arquivo_bytes)
 
     resp_rel = (
@@ -224,9 +302,11 @@ def salvar_relatorio_completo(parser: dict, arquivo_nome: str, arquivo_bytes: by
 
     relatorio_id = resp_rel.data[0]["id"]
 
-    # INSERIR LINHAS
     linhas_insert = []
+    vinculos_insert = []
+
     for l in linhas:
+        # salvar linha
         linhas_insert.append(
             {
                 "relatorio_id": relatorio_id,
@@ -254,19 +334,42 @@ def salvar_relatorio_completo(parser: dict, arquivo_nome: str, arquivo_bytes: by
             }
         )
 
+        # Criar vínculo empresa ↔ segurado
+        empresa_id = get_or_create_empresa(l.get("documento_tomador"))
+
+        if empresa_id and l.get("competencia_ano") and l.get("competencia_mes"):
+            vinculos_insert.append(
+                {
+                    "empresa_id": empresa_id,
+                    "segurado_id": segurado_id,
+                    "relatorio_id": relatorio_id,
+                    "competencia": l.get("competencia_literal"),
+                    "competencia_ano": l.get("competencia_ano"),
+                    "competencia_mes": l.get("competencia_mes"),
+                    "categoria_codigo": l.get("categoria_codigo"),
+                    "fpas": l.get("fpas"),
+                    "remuneracao": l.get("remuneracao"),
+                    "extemporaneo": l.get("extemporaneo"),
+                }
+            )
+
     if linhas_insert:
         supabase.table("ci_gfip_linhas").insert(linhas_insert).execute()
 
+    if vinculos_insert:
+        supabase.table("ci_gfip_empresas_vinculos").insert(vinculos_insert).execute()
+
     return {
-        "status": "novo",
+        "status": "sucesso",
         "segurado_id": segurado_id,
         "relatorio_id": relatorio_id,
         "linhas_salvas": len(linhas_insert),
+        "vinculos_salvos": len(vinculos_insert),
     }
 
 
 # ============================================
-# ENDPOINT PRINCIPAL — PROCESSAR CI GFIP
+# ENDPOINT – PROCESSAR CI GFIP
 # ============================================
 
 @app.post("/ci-gfip/processar")
@@ -279,41 +382,29 @@ async def processar_ci_gfip(
     conteudo = await arquivo.read()
 
     if not conteudo:
-        return {
-            "status": "erro",
-            "mensagem": "Arquivo PDF vazio."
-        }
+        return {"status": "erro", "mensagem": "Arquivo PDF vazio."}
 
     # Arquivo temporário
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(conteudo)
         caminho_pdf = tmp.name
 
-    # Extrair texto
     texto = ""
     with pdfplumber.open(caminho_pdf) as pdf:
         for pagina in pdf.pages:
             texto += (pagina.extract_text() or "") + "\n"
 
-    # Detectar layout
     layout = detectar_layout_ci_gfip(texto)
-
-    # Parse principal
     resultado = parse_ci_gfip(texto)
 
     if resultado.get("erro"):
-        return {
-            "status": "erro",
-            "mensagem": f"Erro no parser: {resultado['erro']}"
-        }
+        return {"status": "erro", "mensagem": f"Erro no parser: {resultado['erro']}"}
 
-    # Inserir profissão e estado no cabeçalho
     cab = resultado.get("cabecalho", {})
     cab["profissao"] = profissao.strip()
     cab["estado"] = estado.strip()
     resultado["cabecalho"] = cab
 
-    # Salvar no Supabase
     save = salvar_relatorio_completo(
         parser=resultado,
         arquivo_nome=arquivo.filename,
@@ -321,20 +412,4 @@ async def processar_ci_gfip(
         modelo=layout,
     )
 
-    # RESPOSTA SUAVE PARA DUPLICIDADE
-    if save["status"] == "duplicado":
-        return {
-            "status": "duplicado",
-            "mensagem": "Relatório já existe — nenhuma ação necessária.",
-            "relatorio_existente_id": save["relatorio_existente_id"]
-        }
-
-    return {
-        "status": "sucesso",
-        "mensagem": "CI GFIP processada com sucesso.",
-        "layout_detectado": layout,
-        "cabecalho": resultado.get("cabecalho"),
-        "total_linhas": resultado.get("linhas") and len(resultado["linhas"]),
-        "arquivo": arquivo.filename,
-        "supabase": save,
-    }
+    return save
