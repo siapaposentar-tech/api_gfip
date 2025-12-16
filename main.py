@@ -82,7 +82,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
     if not nome:
         return None
 
-    # Busca por NIT já existente
+    # Busca segurado por NIT
     if nit:
         r = (
             supabase.table("ci_gfip_segurado_nits")
@@ -93,7 +93,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
         if r.data:
             return r.data[0]["segurado_id"]
 
-    # Cria segurado
+    # Criação do segurado
     resp = (
         supabase.table("ci_gfip_segurados")
         .insert({
@@ -135,7 +135,7 @@ def get_or_create_empresa(doc_tomador: str | None) -> str | None:
         raiz = doc.zfill(8)
         cnpj = None
 
-    # Busca pela raiz (identidade lógica)
+    # Busca empresa pela raiz do CNPJ
     resp = (
         supabase.table("empresas")
         .select("id, cnpj, nome")
@@ -162,7 +162,7 @@ def get_or_create_empresa(doc_tomador: str | None) -> str | None:
 
         return empresa["id"]
 
-    # Cria empresa nova
+    # Criação da empresa
     insert_data = {
         "raiz_cnpj": raiz,
         "cnpj": cnpj,
@@ -247,6 +247,7 @@ def salvar_relatorio_completo(parser: dict, arquivo_nome: str, arquivo_bytes: by
         supabase.table("ci_gfip_empresas_vinculos").insert(vinculos_insert).execute()
 
     return {
+        "success": True,
         "status": "sucesso",
         "relatorio_id": relatorio_id,
         "linhas_salvas": len(linhas_insert),
@@ -265,7 +266,11 @@ async def processar_ci_gfip(
 ):
     conteudo = await arquivo.read()
     if not conteudo:
-        return {"status": "erro", "mensagem": "Arquivo PDF vazio."}
+        return {
+            "success": False,
+            "status": "erro",
+            "mensagem": "Arquivo PDF vazio."
+        }
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(conteudo)
@@ -280,7 +285,11 @@ async def processar_ci_gfip(
     resultado = parse_ci_gfip(texto)
 
     if resultado.get("erro"):
-        return {"status": "erro", "mensagem": resultado["erro"]}
+        return {
+            "success": False,
+            "status": "erro",
+            "mensagem": resultado["erro"]
+        }
 
     # Injeta profissão e estado no cabeçalho
     cab = resultado.get("cabecalho", {}) or {}
