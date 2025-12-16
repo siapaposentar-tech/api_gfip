@@ -50,13 +50,14 @@ def calcular_hash_arquivo(conteudo: bytes) -> str:
     return hashlib.sha256(conteudo).hexdigest()
 
 # ============================================
-# BRASILAPI
+# BRASILAPI (ENRIQUECIMENTO OPCIONAL)
 # ============================================
 
 def consultar_brasilapi_cnpj(cnpj: str) -> dict | None:
     try:
         url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}"
         resp = requests.get(url, timeout=10)
+
         if resp.status_code != 200:
             return None
 
@@ -77,9 +78,11 @@ def get_or_create_segurado(cab: dict) -> str | None:
 
     nit = so_numeros(cab.get("nit"))
     nome = (cab.get("nome") or "").strip()
+
     if not nome:
         return None
 
+    # Busca por NIT já existente
     if nit:
         r = (
             supabase.table("ci_gfip_segurado_nits")
@@ -90,6 +93,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
         if r.data:
             return r.data[0]["segurado_id"]
 
+    # Cria segurado
     resp = (
         supabase.table("ci_gfip_segurados")
         .insert({
@@ -97,6 +101,8 @@ def get_or_create_segurado(cab: dict) -> str | None:
             "data_nascimento": cab.get("data_nascimento"),
             "nome_mae": cab.get("nome_mae"),
             "nit_principal": nit or None,
+            "profissao": cab.get("profissao"),
+            "estado": cab.get("estado"),
         })
         .execute()
     )
@@ -129,6 +135,7 @@ def get_or_create_empresa(doc_tomador: str | None) -> str | None:
         raiz = doc.zfill(8)
         cnpj = None
 
+    # Busca pela raiz (identidade lógica)
     resp = (
         supabase.table("empresas")
         .select("id, cnpj, nome")
@@ -155,6 +162,7 @@ def get_or_create_empresa(doc_tomador: str | None) -> str | None:
 
         return empresa["id"]
 
+    # Cria empresa nova
     insert_data = {
         "raiz_cnpj": raiz,
         "cnpj": cnpj,
@@ -189,6 +197,8 @@ def salvar_relatorio_completo(parser: dict, arquivo_nome: str, arquivo_bytes: by
             "modelo_relatorio": modelo,
             "arquivo_storage_path": arquivo_nome,
             "hash_documento": hash_doc,
+            "profissao": cab.get("profissao"),
+            "estado": cab.get("estado"),
         })
         .execute()
     )
@@ -244,17 +254,18 @@ def salvar_relatorio_completo(parser: dict, arquivo_nome: str, arquivo_bytes: by
     }
 
 # ============================================
-# ENDPOINT
+# ENDPOINT – PROCESSAR CI GFIP
 # ============================================
 
 @app.post("/ci-gfip/processar")
 async def processar_ci_gfip(
     arquivo: UploadFile = File(...),
+    profissao: str = Form(""),
+    estado: str = Form(""),
 ):
-
     conteudo = await arquivo.read()
     if not conteudo:
-        return {"status": "erro", "mensagem": "Arquivo vazio"}
+        return {"status": "erro", "mensagem": "Arquivo PDF vazio."}
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(conteudo)
@@ -270,6 +281,12 @@ async def processar_ci_gfip(
 
     if resultado.get("erro"):
         return {"status": "erro", "mensagem": resultado["erro"]}
+
+    # Injeta profissão e estado no cabeçalho
+    cab = resultado.get("cabecalho", {}) or {}
+    cab["profissao"] = profissao.strip()
+    cab["estado"] = estado.strip()
+    resultado["cabecalho"] = cab
 
     return salvar_relatorio_completo(
         parser=resultado,
