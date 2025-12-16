@@ -14,23 +14,24 @@ from parsers.ci_gfip_universal import (
     detectar_layout_ci_gfip
 )
 
-# ============================================
+# =====================================================
 # FASTAPI CONFIG
-# ============================================
+# =====================================================
 
 app = FastAPI()
 
+# ⚠️ CORS CORRETO PARA LOVABLE (SEM ERRO DE FETCH)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,  # 🔑 CHAVE DO PROBLEMA
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ============================================
+# =====================================================
 # SUPABASE CONFIG
-# ============================================
+# =====================================================
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -39,9 +40,9 @@ supabase: Client | None = None
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ============================================
+# =====================================================
 # HELPERS
-# ============================================
+# =====================================================
 
 def so_numeros(valor: str | None) -> str:
     return re.sub(r"\D", "", valor or "")
@@ -49,9 +50,9 @@ def so_numeros(valor: str | None) -> str:
 def calcular_hash_arquivo(conteudo: bytes) -> str:
     return hashlib.sha256(conteudo).hexdigest()
 
-# ============================================
+# =====================================================
 # BRASILAPI (ENRIQUECIMENTO OPCIONAL)
-# ============================================
+# =====================================================
 
 def consultar_brasilapi_cnpj(cnpj: str) -> dict | None:
     try:
@@ -68,9 +69,9 @@ def consultar_brasilapi_cnpj(cnpj: str) -> dict | None:
     except:
         return None
 
-# ============================================
+# =====================================================
 # SEGURADO
-# ============================================
+# =====================================================
 
 def get_or_create_segurado(cab: dict) -> str | None:
     if supabase is None:
@@ -82,7 +83,6 @@ def get_or_create_segurado(cab: dict) -> str | None:
     if not nome:
         return None
 
-    # Busca segurado por NIT
     if nit:
         r = (
             supabase.table("ci_gfip_segurado_nits")
@@ -93,7 +93,6 @@ def get_or_create_segurado(cab: dict) -> str | None:
         if r.data:
             return r.data[0]["segurado_id"]
 
-    # Criação do segurado
     resp = (
         supabase.table("ci_gfip_segurados")
         .insert({
@@ -116,9 +115,9 @@ def get_or_create_segurado(cab: dict) -> str | None:
 
     return segurado_id
 
-# ============================================
-# EMPRESA (TABELA CENTRAL)
-# ============================================
+# =====================================================
+# EMPRESAS (TABELA CENTRAL)
+# =====================================================
 
 def get_or_create_empresa(doc_tomador: str | None) -> str | None:
     if supabase is None:
@@ -135,7 +134,6 @@ def get_or_create_empresa(doc_tomador: str | None) -> str | None:
         raiz = doc.zfill(8)
         cnpj = None
 
-    # Busca empresa pela raiz do CNPJ
     resp = (
         supabase.table("empresas")
         .select("id, cnpj, nome")
@@ -162,7 +160,6 @@ def get_or_create_empresa(doc_tomador: str | None) -> str | None:
 
         return empresa["id"]
 
-    # Criação da empresa
     insert_data = {
         "raiz_cnpj": raiz,
         "cnpj": cnpj,
@@ -177,9 +174,9 @@ def get_or_create_empresa(doc_tomador: str | None) -> str | None:
     resp_new = supabase.table("empresas").insert(insert_data).execute()
     return resp_new.data[0]["id"]
 
-# ============================================
+# =====================================================
 # SALVAR RELATÓRIO COMPLETO
-# ============================================
+# =====================================================
 
 def salvar_relatorio_completo(parser: dict, arquivo_nome: str, arquivo_bytes: bytes, modelo: str):
 
@@ -254,9 +251,9 @@ def salvar_relatorio_completo(parser: dict, arquivo_nome: str, arquivo_bytes: by
         "vinculos_salvos": len(vinculos_insert),
     }
 
-# ============================================
+# =====================================================
 # ENDPOINT – PROCESSAR CI GFIP
-# ============================================
+# =====================================================
 
 @app.post("/ci-gfip/processar")
 async def processar_ci_gfip(
@@ -291,7 +288,6 @@ async def processar_ci_gfip(
             "mensagem": resultado["erro"]
         }
 
-    # Injeta profissão e estado no cabeçalho
     cab = resultado.get("cabecalho", {}) or {}
     cab["profissao"] = profissao.strip()
     cab["estado"] = estado.strip()
