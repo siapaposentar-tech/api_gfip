@@ -20,11 +20,11 @@ from parsers.ci_gfip_universal import (
 
 app = FastAPI()
 
-# ⚠️ CORS CORRETO PARA LOVABLE (SEM ERRO DE FETCH)
+# ✅ CORS CORRETO PARA USO EM BROWSER (LOVABLE)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,  # 🔑 CHAVE DO PROBLEMA
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -299,3 +299,11 @@ async def processar_ci_gfip(
         arquivo_bytes=conteudo,
         modelo=layout,
     )
+
+# =====================================================
+# OPTIONS – PRELIGHT CORS (OBRIGATÓRIO PARA LOVABLE)
+# =====================================================
+
+@app.options("/ci-gfip/processar")
+async def options_ci_gfip():
+    return {}
