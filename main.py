@@ -14,24 +14,24 @@ from parsers.ci_gfip_universal import (
     detectar_layout_ci_gfip
 )
 
-# =====================================================
-# FASTAPI CONFIG
-# =====================================================
+# ==============================
+# APP
+# ==============================
 
 app = FastAPI()
 
-# ✅ CORS CORRETO PARA USO EM BROWSER (LOVABLE)
+# 👉 CORS CORRETO PARA O LOVABLE
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://lovable.dev"],
     allow_credentials=False,
-    allow_methods=["*"],
+    allow_methods=["POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# =====================================================
-# SUPABASE CONFIG
-# =====================================================
+# ==============================
+# SUPABASE
+# ==============================
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -40,9 +40,9 @@ supabase: Client | None = None
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# =====================================================
+# ==============================
 # HELPERS
-# =====================================================
+# ==============================
 
 def so_numeros(valor: str | None) -> str:
     return re.sub(r"\D", "", valor or "")
@@ -50,15 +50,16 @@ def so_numeros(valor: str | None) -> str:
 def calcular_hash_arquivo(conteudo: bytes) -> str:
     return hashlib.sha256(conteudo).hexdigest()
 
-# =====================================================
-# BRASILAPI (ENRIQUECIMENTO OPCIONAL)
-# =====================================================
+# ==============================
+# BRASILAPI (opcional)
+# ==============================
 
 def consultar_brasilapi_cnpj(cnpj: str) -> dict | None:
     try:
-        url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}"
-        resp = requests.get(url, timeout=10)
-
+        resp = requests.get(
+            f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}",
+            timeout=10
+        )
         if resp.status_code != 200:
             return None
 
@@ -69,18 +70,15 @@ def consultar_brasilapi_cnpj(cnpj: str) -> dict | None:
     except:
         return None
 
-# =====================================================
+# ==============================
 # SEGURADO
-# =====================================================
+# ==============================
 
 def get_or_create_segurado(cab: dict) -> str | None:
-    if supabase is None:
-        return None
-
     nit = so_numeros(cab.get("nit"))
     nome = (cab.get("nome") or "").strip()
 
-    if not nome:
+    if not nome or supabase is None:
         return None
 
     if nit:
@@ -115,26 +113,26 @@ def get_or_create_segurado(cab: dict) -> str | None:
 
     return segurado_id
 
-# =====================================================
-# EMPRESAS (TABELA CENTRAL)
-# =====================================================
+# ==============================
+# EMPRESAS (tabela central)
+# ==============================
 
-def get_or_create_empresa(doc_tomador: str | None) -> str | None:
+def get_or_create_empresa(doc: str | None) -> str | None:
     if supabase is None:
         return None
 
-    doc = so_numeros(doc_tomador)
-    if not doc:
+    numeros = so_numeros(doc)
+    if not numeros:
         return None
 
-    if len(doc) >= 14:
-        raiz = doc[:8]
-        cnpj = doc[:14]
+    if len(numeros) >= 14:
+        raiz = numeros[:8]
+        cnpj = numeros[:14]
     else:
-        raiz = doc.zfill(8)
+        raiz = numeros.zfill(8)
         cnpj = None
 
-    resp = (
+    r = (
         supabase.table("empresas")
         .select("id, cnpj, nome")
         .eq("raiz_cnpj", raiz)
@@ -142,57 +140,58 @@ def get_or_create_empresa(doc_tomador: str | None) -> str | None:
         .execute()
     )
 
-    if resp.data:
-        empresa = resp.data[0]
+    if r.data:
+        empresa = r.data[0]
         updates = {}
 
         if cnpj and not empresa.get("cnpj"):
             updates["cnpj"] = cnpj
 
         if cnpj and not empresa.get("nome"):
-            enriched = consultar_brasilapi_cnpj(cnpj)
-            if enriched and enriched.get("nome"):
-                updates["nome"] = enriched["nome"]
+            info = consultar_brasilapi_cnpj(cnpj)
+            if info and info.get("nome"):
+                updates["nome"] = info["nome"]
 
         if updates:
             updates["atualizado_em"] = "now()"
-            supabase.table("empresas").update(updates).eq("id", empresa["id"]).execute()
+            supabase.table("empresas").update(updates).eq(
+                "id", empresa["id"]
+            ).execute()
 
         return empresa["id"]
 
-    insert_data = {
+    data = {
         "raiz_cnpj": raiz,
         "cnpj": cnpj,
         "origem_inicial": "CI_GFIP",
     }
 
     if cnpj:
-        enriched = consultar_brasilapi_cnpj(cnpj)
-        if enriched and enriched.get("nome"):
-            insert_data["nome"] = enriched["nome"]
+        info = consultar_brasilapi_cnpj(cnpj)
+        if info and info.get("nome"):
+            data["nome"] = info["nome"]
 
-    resp_new = supabase.table("empresas").insert(insert_data).execute()
-    return resp_new.data[0]["id"]
+    r2 = supabase.table("empresas").insert(data).execute()
+    return r2.data[0]["id"]
 
-# =====================================================
-# SALVAR RELATÓRIO COMPLETO
-# =====================================================
+# ==============================
+# SALVAR RELATÓRIO
+# ==============================
 
-def salvar_relatorio_completo(parser: dict, arquivo_nome: str, arquivo_bytes: bytes, modelo: str):
-
-    cab = parser.get("cabecalho", {}) or {}
-    linhas = parser.get("linhas", []) or []
+def salvar_relatorio(parser: dict, nome_arquivo: str, conteudo: bytes, modelo: str):
+    cab = parser.get("cabecalho", {})
+    linhas = parser.get("linhas", [])
 
     segurado_id = get_or_create_segurado(cab)
-    hash_doc = calcular_hash_arquivo(arquivo_bytes)
+    hash_doc = calcular_hash_arquivo(conteudo)
 
-    resp_rel = (
+    r = (
         supabase.table("ci_gfip_relatorios")
         .insert({
             "segurado_id": segurado_id,
             "tipo_relatorio": "ci_gfip",
             "modelo_relatorio": modelo,
-            "arquivo_storage_path": arquivo_nome,
+            "arquivo_storage_path": nome_arquivo,
             "hash_documento": hash_doc,
             "profissao": cab.get("profissao"),
             "estado": cab.get("estado"),
@@ -200,60 +199,26 @@ def salvar_relatorio_completo(parser: dict, arquivo_nome: str, arquivo_bytes: by
         .execute()
     )
 
-    relatorio_id = resp_rel.data[0]["id"]
-
-    linhas_insert = []
-    vinculos_insert = []
+    relatorio_id = r.data[0]["id"]
 
     for l in linhas:
-        linhas_insert.append({
-            "relatorio_id": relatorio_id,
-            "fonte": l.get("fonte"),
-            "nit": l.get("nit"),
-            "competencia_literal": l.get("competencia_literal"),
-            "competencia_date": l.get("competencia_date"),
-            "competencia_ano": l.get("competencia_ano"),
-            "competencia_mes": l.get("competencia_mes"),
-            "documento_tomador": l.get("documento_tomador"),
-            "documento_tomador_tipo": l.get("documento_tomador_tipo"),
-            "fpas": l.get("fpas"),
-            "categoria_codigo": l.get("categoria_codigo"),
-            "remuneracao": l.get("remuneracao"),
-            "extemporaneo": l.get("extemporaneo"),
-        })
-
         empresa_id = get_or_create_empresa(l.get("documento_tomador"))
-
         if empresa_id:
-            vinculos_insert.append({
+            supabase.table("ci_gfip_empresas_vinculos").insert({
                 "empresa_id": empresa_id,
                 "segurado_id": segurado_id,
                 "relatorio_id": relatorio_id,
                 "competencia_ano": l.get("competencia_ano"),
                 "competencia_mes": l.get("competencia_mes"),
-                "categoria_codigo": l.get("categoria_codigo"),
-                "fpas": l.get("fpas"),
-                "remuneracao": l.get("remuneracao"),
-                "extemporaneo": l.get("extemporaneo"),
-            })
-
-    if linhas_insert:
-        supabase.table("ci_gfip_linhas").insert(linhas_insert).execute()
-
-    if vinculos_insert:
-        supabase.table("ci_gfip_empresas_vinculos").insert(vinculos_insert).execute()
+            }).execute()
 
     return {
-        "success": True,
-        "status": "sucesso",
-        "relatorio_id": relatorio_id,
-        "linhas_salvas": len(linhas_insert),
-        "vinculos_salvos": len(vinculos_insert),
+        "status": "sucesso"
     }
 
-# =====================================================
-# ENDPOINT – PROCESSAR CI GFIP
-# =====================================================
+# ==============================
+# ENDPOINT
+# ==============================
 
 @app.post("/ci-gfip/processar")
 async def processar_ci_gfip(
@@ -263,46 +228,36 @@ async def processar_ci_gfip(
 ):
     conteudo = await arquivo.read()
     if not conteudo:
-        return {
-            "success": False,
-            "status": "erro",
-            "mensagem": "Arquivo PDF vazio."
-        }
+        return {"status": "erro"}
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(conteudo)
-        caminho_pdf = tmp.name
+        caminho = tmp.name
 
     texto = ""
-    with pdfplumber.open(caminho_pdf) as pdf:
-        for pagina in pdf.pages:
-            texto += (pagina.extract_text() or "") + "\n"
+    with pdfplumber.open(caminho) as pdf:
+        for p in pdf.pages:
+            texto += (p.extract_text() or "") + "\n"
 
-    layout = detectar_layout_ci_gfip(texto)
     resultado = parse_ci_gfip(texto)
-
     if resultado.get("erro"):
-        return {
-            "success": False,
-            "status": "erro",
-            "mensagem": resultado["erro"]
-        }
+        return {"status": "erro"}
 
-    cab = resultado.get("cabecalho", {}) or {}
-    cab["profissao"] = profissao.strip()
-    cab["estado"] = estado.strip()
+    cab = resultado.get("cabecalho", {})
+    cab["profissao"] = profissao
+    cab["estado"] = estado
     resultado["cabecalho"] = cab
 
-    return salvar_relatorio_completo(
-        parser=resultado,
-        arquivo_nome=arquivo.filename,
-        arquivo_bytes=conteudo,
-        modelo=layout,
+    return salvar_relatorio(
+        resultado,
+        arquivo.filename,
+        conteudo,
+        detectar_layout_ci_gfip(texto)
     )
 
-# =====================================================
-# OPTIONS – PRELIGHT CORS (OBRIGATÓRIO PARA LOVABLE)
-# =====================================================
+# ==============================
+# OPTIONS (preflight)
+# ==============================
 
 @app.options("/ci-gfip/processar")
 async def options_ci_gfip():
