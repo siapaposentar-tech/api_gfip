@@ -2,7 +2,6 @@ import re
 import os
 import hashlib
 import tempfile
-import requests
 
 import pdfplumber
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
@@ -95,7 +94,7 @@ def get_or_create_segurado(cab: dict) -> str | None:
     return segurado_id
 
 # =====================================================
-# EMPRESAS (APENAS CADASTRO CENTRAL)
+# EMPRESAS
 # =====================================================
 
 def get_or_create_empresa(doc: str | None):
@@ -133,7 +132,7 @@ def get_or_create_empresa(doc: str | None):
     }).execute()
 
 # =====================================================
-# SALVAR RELATÓRIO
+# SALVAR RELATÓRIO (COM BLOQUEIO DE DUPLICIDADE)
 # =====================================================
 
 def salvar_relatorio(parser: dict, nome_arquivo: str, conteudo: bytes, modelo: str):
@@ -148,6 +147,26 @@ def salvar_relatorio(parser: dict, nome_arquivo: str, conteudo: bytes, modelo: s
             detail="Não foi possível identificar o segurado no relatório."
         )
 
+    hash_doc = calcular_hash(conteudo)
+
+    # -------- BLOQUEIO DE DUPLICIDADE --------
+    r_existente = (
+        supabase.table("ci_gfip_relatorios")
+        .select("id")
+        .eq("segurado_id", segurado_id)
+        .eq("hash_documento", hash_doc)
+        .limit(1)
+        .execute()
+    )
+
+    if r_existente.data:
+        return {
+            "status": "duplicado",
+            "mensagem": "CI GFIP já importado anteriormente com os mesmos dados.",
+            "relatorio_existente_id": r_existente.data[0]["id"]
+        }
+
+    # -------- SALVAR RELATÓRIO --------
     rel = (
         supabase.table("ci_gfip_relatorios")
         .insert({
@@ -155,7 +174,7 @@ def salvar_relatorio(parser: dict, nome_arquivo: str, conteudo: bytes, modelo: s
             "tipo_relatorio": "ci_gfip",
             "modelo_relatorio": modelo,
             "arquivo_storage_path": nome_arquivo,
-            "hash_documento": calcular_hash(conteudo),
+            "hash_documento": hash_doc,
             "profissao": cab.get("profissao"),
             "estado": cab.get("estado"),
         })
@@ -188,7 +207,10 @@ def salvar_relatorio(parser: dict, nome_arquivo: str, conteudo: bytes, modelo: s
     if linhas_insert:
         supabase.table("ci_gfip_linhas").insert(linhas_insert).execute()
 
-    return {"status": "sucesso"}
+    return {
+        "status": "sucesso",
+        "relatorio_id": relatorio_id
+    }
 
 # =====================================================
 # ENDPOINT
