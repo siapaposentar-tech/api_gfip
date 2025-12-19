@@ -203,22 +203,26 @@ def _linhas_modelo_2(texto: str) -> List[Dict]:
                 extemp_txt       = partes[12] if len(partes) >= 13 else partes[10]
 
             elif fonte == "ESOCIAL" and len(partes) >= 9:
-                nit_raw          = partes[2]
-                competencia      = partes[3]
-                doc_tomador_raw  = partes[4]
-                fpas             = partes[5]
-                data_envio_lit   = partes[6]
-                remun_txt        = partes[8]
-                extemp_txt       = partes[-1]
+                nit_raw          = partes[1]
+                competencia      = partes[2]
+                doc_tomador_raw  = partes[3]   # ID do empregador no eSocial
+                fpas             = partes[4]
+                data_envio_lit   = partes[5]
+                remun_txt        = partes[6]
+                valor_retido_txt = partes[7]
+                extemp_txt       = partes[8]
 
             comp_date, comp_literal = normalizar_competencia(competencia)
             data_envio_date, data_envio_literal = normalizar_data(data_envio_lit)
             remuneracao, remuneracao_literal = normalizar_moeda(remun_txt)
-            valor_retido, valor_retido_literal = (
-                normalizar_moeda(valor_retido_txt) if fonte == "GFIP" else (None, "")
-            )
+            valor_retido, valor_retido_literal = normalizar_moeda(valor_retido_txt)
 
             doc_tomador, doc_tomador_tipo = normalizar_documento_tomador(doc_tomador_raw)
+
+            if fonte == "ESOCIAL":
+                doc_tomador = doc_tomador_raw
+                doc_tomador_tipo = "ESOCIAL"
+
             extemporaneo = extemp_txt.lower().startswith("s") if extemp_txt else False
 
             linhas.append({
@@ -244,7 +248,7 @@ def _linhas_modelo_2(texto: str) -> List[Dict]:
                 "extemporaneo": extemporaneo,
             })
 
-        except:
+        except Exception:
             continue
 
     return linhas
