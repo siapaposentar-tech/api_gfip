@@ -132,7 +132,7 @@ def get_or_create_empresa(doc: str | None):
     }).execute()
 
 # =====================================================
-# SALVAR RELATÓRIO (COM BLOQUEIO DE DUPLICIDADE)
+# SALVAR RELATÓRIO (COM DUPLICIDADE)
 # =====================================================
 
 def salvar_relatorio(parser: dict, nome_arquivo: str, conteudo: bytes, modelo: str):
@@ -149,7 +149,7 @@ def salvar_relatorio(parser: dict, nome_arquivo: str, conteudo: bytes, modelo: s
 
     hash_doc = calcular_hash(conteudo)
 
-    # -------- BLOQUEIO DE DUPLICIDADE --------
+    # -------- DUPLICIDADE --------
     r_existente = (
         supabase.table("ci_gfip_relatorios")
         .select("id")
@@ -162,11 +162,11 @@ def salvar_relatorio(parser: dict, nome_arquivo: str, conteudo: bytes, modelo: s
     if r_existente.data:
         return {
             "status": "duplicado",
-            "mensagem": "CI GFIP já importado anteriormente com os mesmos dados.",
+            "mensagem": "Este relatório já foi processado anteriormente. Nada foi duplicado.",
             "relatorio_existente_id": r_existente.data[0]["id"]
         }
 
-    # -------- SALVAR RELATÓRIO --------
+    # -------- RELATÓRIO --------
     rel = (
         supabase.table("ci_gfip_relatorios")
         .insert({
@@ -189,16 +189,25 @@ def salvar_relatorio(parser: dict, nome_arquivo: str, conteudo: bytes, modelo: s
             "relatorio_id": relatorio_id,
             "fonte": l.get("fonte"),
             "nit": l.get("nit"),
+
             "competencia_literal": l.get("competencia_literal"),
             "competencia_date": l.get("competencia_date"),
             "competencia_ano": l.get("competencia_ano"),
             "competencia_mes": l.get("competencia_mes"),
+
             "documento_tomador": l.get("documento_tomador"),
             "documento_tomador_tipo": l.get("documento_tomador_tipo"),
+
             "fpas": l.get("fpas"),
             "categoria_codigo": l.get("categoria_codigo"),
             "codigo_gfip": l.get("codigo_gfip"),
+
+            "data_envio_literal": l.get("data_envio_literal"),
+            "data_envio_date": l.get("data_envio_date"),
+
             "remuneracao": l.get("remuneracao"),
+            "valor_retido": l.get("valor_retido"),
+
             "extemporaneo": l.get("extemporaneo"),
         })
 
