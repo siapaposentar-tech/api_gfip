@@ -12,7 +12,6 @@ def detectar_layout_ci_gfip(texto: str) -> str:
     Detecta automaticamente o layout do CI GFIP.
     Retorna: "modelo_1", "modelo_2" ou "layout_nao_identificado".
     """
-
     up = texto.upper()
 
     # PRIORIDADE ABSOLUTA: CONSULTA VALORES CI GFIP/eSocial/INSS → modelo_2
@@ -68,7 +67,10 @@ def normalizar_moeda(valor: str | None):
     if not valor:
         return None, ""
     bruto = valor.strip()
-    txt = bruto.replace("R$", "").replace(".", "").replace(",", ".")
+    # aceita "R$ 1.234,56" ou "1.234,56" ou "-"
+    if bruto == "-":
+        return None, bruto
+    txt = bruto.replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
     try:
         return float(Decimal(txt)), bruto
     except:
@@ -97,6 +99,23 @@ def normalizar_documento_tomador(valor: str | None):
         return numeros[:8].zfill(8), "CNPJ_RAIZ"
 
     return numeros, "DESCONHECIDO"
+
+
+def _merge_moeda_tokens(partes: List[str]) -> List[str]:
+    """
+    Junta tokens quando vier no formato: ['R$', '2.948,38'] -> ['R$ 2.948,38']
+    Isso evita deslocamento de colunas.
+    """
+    out: List[str] = []
+    i = 0
+    while i < len(partes):
+        if partes[i] == "R$" and i + 1 < len(partes):
+            out.append(f"R$ {partes[i + 1]}")
+            i += 2
+            continue
+        out.append(partes[i])
+        i += 1
+    return out
 
 
 # ============================================================
@@ -180,6 +199,8 @@ def _linhas_modelo_2(texto: str) -> List[Dict]:
         if not partes:
             continue
 
+        partes = _merge_moeda_tokens(partes)
+
         fonte = partes[0].upper()
         if fonte not in ("GFIP", "ESOCIAL"):
             continue
@@ -198,8 +219,11 @@ def _linhas_modelo_2(texto: str) -> List[Dict]:
             valor_retido_txt = ""
             extemp_txt = ""
 
-            # GFIP novo (13 colunas)
+            # ----------------------------
+            # GFIP (pode vir com 13 ou 11)
+            # ----------------------------
             if fonte == "GFIP" and len(partes) >= 13:
+                # GFIP novo (13 colunas)
                 numero_documento = partes[1]
                 nit_raw          = partes[2]
                 competencia      = partes[3]
@@ -213,8 +237,8 @@ def _linhas_modelo_2(texto: str) -> List[Dict]:
                 valor_retido_txt = partes[11]
                 extemp_txt       = partes[12]
 
-            # GFIP antigo (11 colunas)
             elif fonte == "GFIP" and len(partes) == 11:
+                # GFIP antigo (11 colunas)
                 nit_raw          = partes[1]
                 competencia      = partes[2]
                 doc_tomador_raw  = partes[3]
@@ -226,21 +250,47 @@ def _linhas_modelo_2(texto: str) -> List[Dict]:
                 valor_retido_txt = partes[9]
                 extemp_txt       = partes[10]
 
-            # eSocial (12 colunas)
-            elif fonte == "ESOCIAL" and len(partes) >= 12:
-                numero_documento = partes[1]
-                nit_raw          = partes[2]
-                competencia      = partes[3]
-                doc_tomador_raw  = partes[4]
-                fpas             = partes[5]
-                categoria        = partes[6]
-                data_envio_lit   = partes[7]
-                tipo_rem         = partes[8]
-                remun_txt        = partes[9]
-                valor_retido_txt = partes[10]
-                extemp_txt       = partes[11]
+            # -----------------------------------------
+            # ESOCIAL (NÃO TEM categoria/código GFIP)
+            # Corrigido: data de envio vai para data_envio
+            # -----------------------------------------
+            elif fonte == "ESOCIAL":
+                # Formato mais comum após merge de "R$ 76,71":
+                # ESOCIAL <num_doc> <nit> <compet> <doc> <fpas> <data_envio> <tipo_rem> <remun> <valor_retido> <extemp>
+                # ou sem valor_retido:
+                # ESOCIAL <num_doc> <nit> <compet> <doc> <fpas> <data_envio> <tipo_rem> <remun> <extemp>
+                if len(partes) >= 11:
+                    numero_documento = partes[1]
+                    nit_raw          = partes[2]
+                    competencia      = partes[3]
+                    doc_tomador_raw  = partes[4]
+                    fpas             = partes[5]
+                    data_envio_lit   = partes[6]
+                    tipo_rem         = partes[7]
+                    remun_txt        = partes[8]
+                    valor_retido_txt = partes[9]
+                    extemp_txt       = partes[10]
+                elif len(partes) == 10:
+                    numero_documento = partes[1]
+                    nit_raw          = partes[2]
+                    competencia      = partes[3]
+                    doc_tomador_raw  = partes[4]
+                    fpas             = partes[5]
+                    data_envio_lit   = partes[6]
+                    tipo_rem         = partes[7]
+                    remun_txt        = partes[8]
+                    extemp_txt       = partes[9]
+                else:
+                    continue
 
-            # Fallback híbrido
+                # Regras ESOCIAL
+                categoria = None
+                codigo_gfip = None
+                valor_retido_txt = ""  # ESOCIAL não deve preencher valor_retido
+
+            # ----------------------------
+            # Fallback (evita travar)
+            # ----------------------------
             elif len(partes) >= 9:
                 nit_raw          = partes[1]
                 competencia      = partes[2]
@@ -251,18 +301,28 @@ def _linhas_modelo_2(texto: str) -> List[Dict]:
                 remun_txt        = partes[7]
                 valor_retido_txt = partes[8]
                 extemp_txt       = partes[9] if len(partes) > 9 else ""
-
             else:
                 continue
 
             comp_date, comp_literal = normalizar_competencia(competencia)
             data_envio_date, data_envio_literal = normalizar_data(data_envio_lit)
             remuneracao, remuneracao_literal = normalizar_moeda(remun_txt)
-            valor_retido, valor_retido_literal = normalizar_moeda(valor_retido_txt)
+
+            # Valor retido só para GFIP
+            if fonte == "GFIP":
+                valor_retido, valor_retido_literal = normalizar_moeda(valor_retido_txt)
+            else:
+                valor_retido, valor_retido_literal = None, ""
+
             doc_tomador, doc_tomador_tipo = normalizar_documento_tomador(doc_tomador_raw)
 
             extemp_literal = extemp_txt.strip()
             extemporaneo = extemp_literal.lower().startswith("s") if extemp_literal else False
+
+            # REGRA FINAL: ESOCIAL não tem categoria/cod GFIP
+            if fonte != "GFIP":
+                categoria = None
+                codigo_gfip = None
 
             linhas.append({
                 "fonte": fonte,
@@ -277,13 +337,18 @@ def _linhas_modelo_2(texto: str) -> List[Dict]:
                 "fpas": fpas,
                 "categoria_codigo": categoria,
                 "codigo_gfip": codigo_gfip,
-                "data_envio_literal": data_envio_literal,
-                "data_envio_date": data_envio_date,
+
+                # data de envio (especialmente importante para ESOCIAL)
+                "data_envio_literal": data_envio_literal if fonte == "ESOCIAL" else data_envio_literal,
+                "data_envio_date": data_envio_date if fonte == "ESOCIAL" else data_envio_date,
+
                 "tipo_remuneracao": tipo_rem,
                 "remuneracao_literal": remuneracao_literal,
                 "remuneracao": remuneracao,
+
                 "valor_retido_literal": valor_retido_literal,
                 "valor_retido": valor_retido,
+
                 "extemporaneo_literal": extemp_literal,
                 "extemporaneo": extemporaneo,
             })
